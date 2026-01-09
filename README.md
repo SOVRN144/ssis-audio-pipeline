@@ -9,7 +9,7 @@ SSIS Audio Pipeline (Blueprint #1) is a multi-stage, resilient audio processing 
 The following artifacts are defined by SSIS Blueprint #1 v1.4 and will be implemented in later steps:
 
 - **AudioAsset**: Metadata record tracking the original audio file and processing state
-- **normalized.wav**: Standardized 16-bit PCM mono audio at 16kHz sample rate
+- **normalized.wav**: 22050 Hz mono, 16-bit PCM WAV (canonical derivative)
 - **FeaturePack.h5**: HDF5-stored acoustic feature vectors (MFCC, spectral features)
 - **segments.json**: Timestamped speech/music classification segments with confidence scores
 - **preview.json**: Compact audio summary with statistical features and representative snippets
