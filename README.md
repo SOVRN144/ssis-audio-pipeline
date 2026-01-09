@@ -4,9 +4,9 @@
 
 SSIS Audio Pipeline (Blueprint #1) is a multi-stage, resilient audio processing system designed for streaming segmentation and analysis. The pipeline accepts raw audio files, normalizes them, extracts acoustic features, identifies speech/music segments, generates compact preview representations, and maintains telemetry for each processing job. Built for local-first operation without cloud dependencies, it emphasizes atomic file operations, contract-driven development, and comprehensive testing across contract, end-to-end, and resilience dimensions.
 
-## Core Artifacts
+## Planned Artifacts (Blueprint #1 v1.4)
 
-The pipeline produces and manages the following artifacts:
+The following artifacts are defined by SSIS Blueprint #1 v1.4 and will be implemented in later steps:
 
 - **AudioAsset**: Metadata record tracking the original audio file and processing state
 - **normalized.wav**: Standardized 16-bit PCM mono audio at 16kHz sample rate
@@ -15,6 +15,8 @@ The pipeline produces and manages the following artifacts:
 - **preview.json**: Compact audio summary with statistical features and representative snippets
 - **pipeline_jobs**: Telemetry database tracking job state, timing, and error conditions
 - **feature_specs**: Registry of feature extraction configurations and versioning
+
+> **Note**: These artifacts are not yet implemented. Step 0 provides repo scaffolding and CI only.
 
 ## Development Roadmap
 
@@ -97,21 +99,25 @@ mypy app/ services/
 
 ```
 ssis-audio-pipeline/
-├── app/                    # Core application modules
-│   └── utils/              # Shared utilities
-├── services/               # Service components
+├── .claude/agents/         # Claude Code project-level subagents
+├── app/                    # Core application modules (placeholder)
+│   └── utils/              # Shared utilities (placeholder)
+├── docs/                   # Human-readable documentation
+│   └── blueprints/         # Blueprint PDFs and research docs
+├── services/               # Service components (placeholders)
 │   ├── ingest_api/         # Audio ingestion endpoint
 │   ├── worker_decode/      # Audio normalization worker
 │   ├── worker_features/    # Feature extraction worker
 │   ├── worker_segments/    # Segmentation worker
 │   └── worker_preview/     # Preview generation worker
 ├── tests/                  # Test suites
-│   ├── contract/           # Contract tests
-│   ├── e2e/                # End-to-end tests
-│   └── resilience/         # Resilience tests
-├── specs/                  # Blueprint specification documents
+│   ├── contract/           # Contract tests (placeholder)
+│   ├── e2e/                # End-to-end tests (placeholder)
+│   └── resilience/         # Resilience tests (placeholder)
+├── specs/                  # Reserved for JSON Schemas (Step 1)
 ├── data/                   # Local data storage (gitignored)
-└── logs/                   # Application logs (gitignored)
+├── logs/                   # Application logs (gitignored)
+└── CLAUDE.md               # Repo operating rules for AI agents
 ```
 
 ## License
@@ -120,7 +126,9 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Documentation
 
-Full specification documents are available in the `specs/` directory:
-- SSIS Blueprint #1 v1.4
-- SSIS Research Pack v1.0
-- SSIS Blueprint #1 v1.4 Checklist
+Blueprint specification documents are available in `docs/blueprints/`:
+- SSIS Blueprint #1 v1.4.pdf
+- SSIS Research Pack v1.0.pdf
+- SSIS Blueprint #1 v1.4 Checklist.pdf
+
+> **Note**: The `specs/` directory is reserved for machine-readable JSON Schemas, to be added in Step 1.
