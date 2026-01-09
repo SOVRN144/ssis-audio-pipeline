@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feature_pack.v1",
+  "title": "FeaturePack",
+  "description": "Metadata record for a feature pack (HDF5 containing mel + embeddings)",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "version",
+    "asset_id",
+    "computed_at",
+    "feature_spec_alias",
+    "feature_spec_id",
+    "embedding_backend",
+    "embedding_model_id",
+    "hdf5_uri"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "feature_pack.v1",
+      "description": "Schema identifier"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semver)"
+    },
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to the audio asset"
+    },
+    "computed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this feature pack was computed"
+    },
+    "feature_spec_alias": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{12}$",
+      "description": "Short stable alias (first 12 chars of sha256(feature_spec_id))"
+    },
+    "feature_spec_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable canonical feature specification ID"
+    },
+    "embedding_backend": {
+      "type": "string",
+      "enum": ["onnxruntime"],
+      "description": "Backend used for embedding inference"
+    },
+    "embedding_model_id": {
+      "type": "string",
+      "description": "Identifier of the embedding model (e.g., yamnet)"
+    },
+    "embedding_model_hash": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "SHA256 hash of the model file with prefix"
+    },
+    "hdf5_uri": {
+      "type": "string",
+      "description": "URI to the HDF5 file (e.g., data/features/{asset_id}.{alias}.h5)"
+    },
+    "mel_shape": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "description": "Shape of the mel spectrogram array [time, mel_bins]"
+    },
+    "embedding_shape": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "description": "Shape of the embedding array [time, embedding_dim]"
+    },
+    "sample_rate": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Sample rate used for feature extraction"
+    },
+    "mel_hop_samples": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Hop length in samples for mel spectrogram"
+    },
+    "embedding_hop_sec": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Hop length in seconds for embedding extraction"
+    }
+  }
+}

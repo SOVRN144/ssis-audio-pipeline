@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pipeline_job.v1",
+  "title": "PipelineJob",
+  "description": "Per-stage job telemetry record",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "version",
+    "asset_id",
+    "computed_at",
+    "job_id",
+    "stage",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "pipeline_job.v1",
+      "description": "Schema identifier"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semver)"
+    },
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to the audio asset"
+    },
+    "computed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this job record was created/updated"
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this job"
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["ingest", "decode", "features", "segments", "preview"],
+      "description": "Pipeline stage name"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "running", "completed", "failed", "dead_letter"],
+      "description": "Current job status"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Current attempt number (1-indexed)"
+    },
+    "worker_id": {
+      "type": ["string", "null"],
+      "description": "Identifier of the worker processing this job"
+    },
+    "started_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when job execution started"
+    },
+    "finished_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when job execution finished"
+    },
+    "error_code": {
+      "type": ["string", "null"],
+      "description": "Error taxonomy code if job failed"
+    },
+    "error_message": {
+      "type": ["string", "null"],
+      "description": "Human-readable error message if job failed"
+    },
+    "metrics_json": {
+      "type": ["object", "null"],
+      "description": "Stage-specific metrics (file_size, hash_time, inference_time, etc.)"
+    },
+    "feature_spec_alias": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{12}$",
+      "description": "FeatureSpec alias if applicable to this stage"
+    }
+  }
+}

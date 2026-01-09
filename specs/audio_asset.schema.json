@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audio_asset.v1",
+  "title": "AudioAsset",
+  "description": "Canonical identity and source metadata for an audio asset",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "version",
+    "asset_id",
+    "computed_at",
+    "content_hash",
+    "source_uri",
+    "original_filename"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "audio_asset.v1",
+      "description": "Schema identifier"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semver)"
+    },
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this audio asset"
+    },
+    "computed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this record was created"
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA256 hex digest of the original file content"
+    },
+    "source_uri": {
+      "type": "string",
+      "description": "Path to the original audio file in SSIS-managed storage"
+    },
+    "original_filename": {
+      "type": "string",
+      "description": "Original filename as provided during ingest"
+    },
+    "owner_entity_id": {
+      "type": ["string", "null"],
+      "description": "Optional owner entity for idempotency checks"
+    },
+    "duration_sec": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Best-effort extracted duration in seconds"
+    },
+    "sample_rate": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Best-effort extracted sample rate in Hz"
+    },
+    "channels": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Best-effort extracted channel count"
+    },
+    "format_guess": {
+      "type": ["string", "null"],
+      "description": "Best-effort guessed audio format"
+    }
+  }
+}

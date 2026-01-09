@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "segments.v1",
+  "title": "Segments",
+  "description": "Speech/music/noise/silence segment regions for an audio asset",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "version",
+    "asset_id",
+    "computed_at",
+    "segments"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "segments.v1",
+      "description": "Schema identifier"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semver)"
+    },
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to the audio asset"
+    },
+    "computed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when segments were computed"
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "start_sec", "end_sec"],
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": ["speech", "music", "noise", "silence"],
+            "description": "Segment classification label"
+          },
+          "start_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Start time in seconds"
+          },
+          "end_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "End time in seconds"
+          },
+          "confidence": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Heuristic confidence score (not calibrated)"
+          },
+          "confidence_type": {
+            "type": ["string", "null"],
+            "const": "heuristic_v1",
+            "description": "Type of confidence score"
+          }
+        }
+      },
+      "description": "Array of segment regions"
+    },
+    "total_duration_sec": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Total audio duration in seconds"
+    },
+    "segment_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Total number of segments"
+    },
+    "class_distribution": {
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0
+      },
+      "description": "Duration in seconds per class label"
+    }
+  }
+}

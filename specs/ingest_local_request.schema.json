@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ingest_local_request.v1",
+  "title": "IngestLocalRequest",
+  "description": "Request payload for local file ingest",
+  "type": "object",
+  "required": ["source_path"],
+  "additionalProperties": false,
+  "properties": {
+    "source_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the local audio file to ingest"
+    },
+    "owner_entity_id": {
+      "type": ["string", "null"],
+      "description": "Optional owner entity ID for idempotency enforcement"
+    },
+    "original_filename": {
+      "type": ["string", "null"],
+      "description": "Override filename (defaults to basename of source_path)"
+    },
+    "metadata": {
+      "type": ["object", "null"],
+      "description": "Optional additional metadata to store with the asset"
+    }
+  }
+}

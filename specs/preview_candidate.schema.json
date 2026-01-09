@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "preview_candidate.v1",
+  "title": "PreviewCandidate",
+  "description": "Selected preview window for an audio asset",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "version",
+    "asset_id",
+    "computed_at",
+    "mode",
+    "start_sec",
+    "end_sec",
+    "duration_sec"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "preview_candidate.v1",
+      "description": "Schema identifier"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semver)"
+    },
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to the audio asset"
+    },
+    "computed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when preview was computed"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["smart", "intro", "fallback"],
+      "description": "Selection mode used (smart=heuristic selected, intro/fallback=default)"
+    },
+    "start_sec": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Preview window start time in seconds"
+    },
+    "end_sec": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Preview window end time in seconds"
+    },
+    "duration_sec": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Preview window duration in seconds"
+    },
+    "confidence": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Heuristic confidence score for the selection"
+    },
+    "fallback_used": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether fallback selection was used"
+    },
+    "reason": {
+      "type": ["string", "null"],
+      "description": "Human-readable reason for selection or fallback"
+    },
+    "feature_spec_alias": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{12}$",
+      "description": "FeatureSpec alias used for embedding-based scoring"
+    },
+    "candidate_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Number of candidates evaluated"
+    },
+    "best_score": {
+      "type": ["number", "null"],
+      "description": "Score of the selected candidate"
+    }
+  }
+}

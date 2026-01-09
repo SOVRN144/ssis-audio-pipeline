@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "preview_feedback.v1",
+  "title": "PreviewFeedback",
+  "description": "User feedback on preview selection (optional future contract for learning)",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "version",
+    "asset_id",
+    "computed_at",
+    "feedback_id"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "preview_feedback.v1",
+      "description": "Schema identifier"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semver)"
+    },
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to the audio asset"
+    },
+    "computed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when feedback was recorded"
+    },
+    "feedback_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this feedback record"
+    },
+    "preview_start_sec": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Start of the preview window that was shown"
+    },
+    "preview_end_sec": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "End of the preview window that was shown"
+    },
+    "listen_duration_sec": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "How long the user listened before action"
+    },
+    "action": {
+      "type": ["string", "null"],
+      "enum": ["skip", "play_full", "save", "dismiss", null],
+      "description": "User action taken after preview"
+    },
+    "user_id": {
+      "type": ["string", "null"],
+      "description": "Optional anonymized user identifier"
+    }
+  }
+}
