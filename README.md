@@ -50,7 +50,6 @@ The following artifacts are defined by SSIS Blueprint #1 v1.4 and will be implem
 
 - Python 3.11 or higher
 - Git
-- (Optional) Configure git to use the repo's global ignore file for macOS/editor artifacts: `git config --global core.excludesFile ~/.gitignore_global` then copy `.gitignore_global` to that path.
 
 ### Installation
 
@@ -95,6 +94,13 @@ ruff format .
 # Type checking (optional)
 mypy app/ services/
 ```
+
+### Optional: Global git ignore for macOS/editor artifacts
+
+1. Copy the repo file to a global ignore location:
+   `cp .gitignore_global ~/.gitignore_global`
+2. Tell git to use it:
+   `git config --global core.excludesFile ~/.gitignore_global`
 
 ## Project Structure
 
