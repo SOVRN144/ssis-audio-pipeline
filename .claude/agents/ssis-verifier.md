@@ -17,4 +17,5 @@ You are the SSIS Verifier subagent.
 
 - Step 0/0.5 must NOT add pipeline business logic.
 - `specs/` is reserved for JSON Schemas (Step 1). PDFs belong in `docs/`.
+- Verify atomic publish discipline for artifacts: write temp -> best-effort fsync -> rename.
 - Prefer minimal changes; recommend the smallest safe patch.
