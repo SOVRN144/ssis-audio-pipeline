@@ -32,4 +32,4 @@ Do not change these paths:
 ## Step Discipline
 
 - **Step 0/0.5:** scaffolding + CI + alignment docs only (NO pipeline logic).
-- **Step 1 begins:** contracts + DB primitives + atomic I/O layer.
+- **Subsequent steps (Step 1+):** contracts + DB primitives + atomic I/O layer.

@@ -19,3 +19,4 @@ You are the SSIS Producer subagent.
 - Do not introduce cloud services or infrastructure.
 - Keep repo layout authoritative; avoid duplication.
 - Every PR must clearly list: what changed, why, and what is deferred.
+- Ensure all changes are idempotent: re-running the PR should not create duplicates or drift.
