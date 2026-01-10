@@ -1,8 +1,5 @@
 """Tests for app.utils.hashing module."""
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from app.utils.hashing import feature_spec_alias, sha256_bytes, sha256_file
@@ -39,50 +36,38 @@ class TestSha256Bytes:
 class TestSha256File:
     """Tests for sha256_file function."""
 
-    def test_file_hash_matches_bytes_hash(self):
+    def test_file_hash_matches_bytes_hash(self, tmp_path):
         """File hash should match hash of file contents."""
         content = b"test file content for hashing"
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            f.write(content)
-            temp_path = f.name
+        temp_file = tmp_path / "test_content.bin"
+        temp_file.write_bytes(content)
 
-        try:
-            file_hash = sha256_file(temp_path)
-            bytes_hash = sha256_bytes(content)
-            assert file_hash == bytes_hash
-        finally:
-            Path(temp_path).unlink()
+        file_hash = sha256_file(temp_file)
+        bytes_hash = sha256_bytes(content)
+        assert file_hash == bytes_hash
 
-    def test_accepts_path_object(self):
+    def test_accepts_path_object(self, tmp_path):
         """Should accept Path objects."""
         content = b"path object test"
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            f.write(content)
-            temp_path = Path(f.name)
+        temp_file = tmp_path / "path_test.bin"
+        temp_file.write_bytes(content)
 
-        try:
-            result = sha256_file(temp_path)
-            assert len(result) == 64
-        finally:
-            temp_path.unlink()
+        result = sha256_file(temp_file)
+        assert len(result) == 64
 
     def test_nonexistent_file_raises(self):
         """Nonexistent file should raise FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             sha256_file("/nonexistent/path/file.txt")
 
-    def test_returns_hex_only(self):
+    def test_returns_hex_only(self, tmp_path):
         """File hash should be hex digest only, no prefix."""
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            f.write(b"content")
-            temp_path = f.name
+        temp_file = tmp_path / "hex_test.bin"
+        temp_file.write_bytes(b"content")
 
-        try:
-            result = sha256_file(temp_path)
-            assert not result.startswith("sha256:")
-            assert len(result) == 64
-        finally:
-            Path(temp_path).unlink()
+        result = sha256_file(temp_file)
+        assert not result.startswith("sha256:")
+        assert len(result) == 64
 
 
 class TestFeatureSpecAlias:

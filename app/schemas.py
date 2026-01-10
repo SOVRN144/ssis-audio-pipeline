@@ -1,8 +1,14 @@
 """SSIS Audio Pipeline - Pydantic models for API validation.
 
 STUB: Implementation deferred to Step 2.
-This module will provide Pydantic models for request/response validation.
+
+Do not import runtime models from this module until Step 2.
+This module will provide Pydantic models for request/response validation
+corresponding to the JSON schemas in /specs.
 """
+
+# Explicit empty exports to prevent accidental "assumed exports"
+__all__: list[str] = []
 
 # TODO (Step 2): Implement Pydantic models
 #

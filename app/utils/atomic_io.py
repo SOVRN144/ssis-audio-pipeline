@@ -37,13 +37,21 @@ def atomic_write_bytes(
     # Ensure parent directory exists
     final_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write to temp file
+    # Write to temp file with cleanup on failure
     fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
         os.write(fd, data)
         # Flush to OS buffers
         os.fsync(fd)
-    finally:
+    except Exception:
+        # Close fd and cleanup orphan temp file on write/fsync failure
+        os.close(fd)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass  # Best-effort cleanup
+        raise
+    else:
         os.close(fd)
 
     # Best-effort fsync on directory for rename durability
