@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ingest_local_request.v1",
+  "$comment": "Request payload for local ingest (Step 2). Not a produced pipeline artifact.",
   "title": "IngestLocalRequest",
-  "description": "Request payload for local file ingest",
+  "description": "Request payload for local file ingest (Step 2). This is an API request schema, not a produced pipeline artifact.",
   "type": "object",
   "required": ["source_path"],
   "additionalProperties": false,
