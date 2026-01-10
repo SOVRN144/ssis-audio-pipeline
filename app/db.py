@@ -3,7 +3,7 @@
 SQLAlchemy sync engine/session factory for SQLite.
 """
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import DB_PATH
@@ -23,7 +23,7 @@ def get_database_url(db_path: str | None = None) -> str:
     return f"sqlite:///{path}"
 
 
-def create_db_engine(db_path=None, echo: bool = False):
+def create_db_engine(db_path: str | None = None, echo: bool = False) -> Engine:
     """Create SQLAlchemy engine.
 
     Args:
@@ -44,7 +44,7 @@ def create_db_engine(db_path=None, echo: bool = False):
     )
 
 
-def create_session_factory(engine) -> sessionmaker:
+def create_session_factory(engine: Engine) -> sessionmaker:
     """Create a session factory bound to the given engine.
 
     Args:
@@ -53,10 +53,14 @@ def create_session_factory(engine) -> sessionmaker:
     Returns:
         Configured sessionmaker.
     """
+    # Session factory settings (intentional for this project):
+    # - autoflush=False: explicit flush control for deterministic primitives
+    # - expire_on_commit=False: objects remain usable post-commit; aligns with
+    #   "one session per unit of work" discipline
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def init_db(db_path=None, echo: bool = False) -> tuple:
+def init_db(db_path: str | None = None, echo: bool = False) -> tuple[Engine, sessionmaker]:
     """Initialize the database: create engine, session factory, and all tables.
 
     This is idempotent - safe to call multiple times.
