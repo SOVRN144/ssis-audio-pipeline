@@ -5,7 +5,7 @@ SQLAlchemy sync engine/session factory for SQLite.
 
 from datetime import UTC
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import DB_PATH
@@ -77,17 +77,20 @@ def init_db(db_path=None, echo: bool = False) -> tuple:
     return engine, SessionFactory
 
 
-def get_session(engine) -> Session:
-    """Get a new database session.
+def get_session(session_factory: sessionmaker) -> Session:
+    """Get a new database session from a session factory.
 
     Args:
-        engine: SQLAlchemy Engine instance.
+        session_factory: A sessionmaker instance (from create_session_factory or init_db).
 
     Returns:
         New Session instance. Caller is responsible for closing.
+
+    Note:
+        Prefer using the session factory directly: `session = SessionFactory()`
+        or use init_db() which returns (engine, SessionFactory).
     """
-    SessionFactory = create_session_factory(engine)
-    return SessionFactory()
+    return session_factory()
 
 
 # --- FeatureSpec Immutability Primitive ---
@@ -141,8 +144,9 @@ def register_feature_spec(
 
     alias = feature_spec_alias(feature_spec_id)
 
-    # Check if alias already exists
-    existing = session.query(FeatureSpec).filter(FeatureSpec.alias == alias).first()
+    # Check if alias already exists (SQLAlchemy 2.0 style)
+    stmt = select(FeatureSpec).where(FeatureSpec.alias == alias)
+    existing = session.execute(stmt).scalar_one_or_none()
 
     if existing is None:
         # Insert new record

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "SSIS Audio Pipeline - Blueprint #1: Multi-stage audio processing pipeline for streaming segmentation"
 requires-python = ">=3.11"
 dependencies = [
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy>=2.0,<3",
 ]
 
 [project.optional-dependencies]

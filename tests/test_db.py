@@ -2,8 +2,10 @@
 
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import pytest
+from sqlalchemy import select
 
 from app.db import (
     FeatureSpecAliasCollision,
@@ -81,8 +83,9 @@ class TestRegisterFeatureSpec:
             assert alias == expected_alias
             assert len(alias) == 12
 
-            # Verify in database
-            spec = session.query(FeatureSpec).filter(FeatureSpec.alias == alias).first()
+            # Verify in database (SQLAlchemy 2.0 style)
+            stmt = select(FeatureSpec).where(FeatureSpec.alias == alias)
+            spec = session.execute(stmt).scalar_one_or_none()
             assert spec is not None
             assert spec.feature_spec_id == spec_id
             assert spec.notes == "test notes"
@@ -101,8 +104,9 @@ class TestRegisterFeatureSpec:
             alias1 = register_feature_spec(session, spec_id)
             session.commit()
 
-            # Get created_at from first registration
-            spec1 = session.query(FeatureSpec).filter(FeatureSpec.alias == alias1).first()
+            # Get created_at from first registration (SQLAlchemy 2.0 style)
+            stmt = select(FeatureSpec).where(FeatureSpec.alias == alias1)
+            spec1 = session.execute(stmt).scalar_one()
             created_at_1 = spec1.created_at
 
             # Register same spec again
@@ -112,52 +116,52 @@ class TestRegisterFeatureSpec:
             # Should return same alias
             assert alias1 == alias2
 
-            # Should not create duplicate
-            count = session.query(FeatureSpec).filter(FeatureSpec.alias == alias1).count()
+            # Should not create duplicate (SQLAlchemy 2.0 style)
+            from sqlalchemy import func
+
+            count_stmt = select(func.count()).select_from(FeatureSpec).where(
+                FeatureSpec.alias == alias1
+            )
+            count = session.execute(count_stmt).scalar()
             assert count == 1
 
             # created_at should be unchanged (no update)
-            spec2 = session.query(FeatureSpec).filter(FeatureSpec.alias == alias2).first()
+            spec2 = session.execute(stmt).scalar_one()
             assert spec2.created_at == created_at_1
         finally:
             session.close()
 
-    def test_collision_different_spec(self, temp_db):
-        """Should raise FeatureSpecAliasCollision when alias maps to different spec."""
+    def test_collision_different_spec_via_mock(self, temp_db):
+        """Should raise FeatureSpecAliasCollision when alias maps to different spec.
+
+        Uses mock.patch to force a hash collision by making the second spec_id
+        resolve to the same alias as the first.
+        """
         _, engine, SessionFactory = temp_db
         session = SessionFactory()
 
         try:
-            # First, we need two different spec_ids that produce the same alias
-            # This is astronomically unlikely with real hashes, so we'll
-            # manually create a collision scenario by inserting directly
+            spec_id_1 = "original_spec_id"
+            spec_id_2 = "different_spec_id"
 
-            alias = "abcd12345678"
-            spec_id_1 = "original_spec"
-            spec_id_2 = "different_spec"
-
-            # Insert first spec directly with known alias
-            spec1 = FeatureSpec(alias=alias, feature_spec_id=spec_id_1)
-            session.add(spec1)
+            # Register first spec normally
+            alias1 = register_feature_spec(session, spec_id_1)
             session.commit()
 
-            # Now try to register a different spec that would produce the same alias
-            # We'll mock this by using a spec_id that hashes to our test alias
+            # Patch feature_spec_alias at the source module to return the same alias
+            # This simulates a hash collision
+            with mock.patch(
+                "app.utils.hashing.feature_spec_alias", return_value=alias1
+            ):
+                with pytest.raises(FeatureSpecAliasCollision) as exc_info:
+                    register_feature_spec(session, spec_id_2)
 
-            # Actually, let's test the real scenario: different spec_id, same alias
-            # We need to bypass the hash computation for this test
-
-            # Test the error is raised correctly
-            with pytest.raises(FeatureSpecAliasCollision) as exc_info:
-                # Manually check collision logic
-                existing = session.query(FeatureSpec).filter(FeatureSpec.alias == alias).first()
-                if existing and existing.feature_spec_id != spec_id_2:
-                    raise FeatureSpecAliasCollision(alias, existing.feature_spec_id, spec_id_2)
-
-            assert exc_info.value.alias == alias
-            assert exc_info.value.existing_spec_id == spec_id_1
-            assert exc_info.value.new_spec_id == spec_id_2
-            assert "FEATURE_SPEC_ALIAS_COLLISION" in str(exc_info.value)
+            # Verify exception contains correct information
+            exc = exc_info.value
+            assert exc.alias == alias1
+            assert exc.existing_spec_id == spec_id_1
+            assert exc.new_spec_id == spec_id_2
+            assert "FEATURE_SPEC_ALIAS_COLLISION" in str(exc)
         finally:
             session.close()
 
@@ -182,8 +186,11 @@ class TestRegisterFeatureSpec:
             # All aliases should be unique
             assert len(set(aliases)) == len(aliases)
 
-            # All should be in database
-            count = session.query(FeatureSpec).count()
+            # All should be in database (SQLAlchemy 2.0 style)
+            from sqlalchemy import func
+
+            count_stmt = select(func.count()).select_from(FeatureSpec)
+            count = session.execute(count_stmt).scalar()
             assert count == len(spec_ids)
         finally:
             session.close()
