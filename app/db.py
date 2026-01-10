@@ -3,7 +3,7 @@
 SQLAlchemy sync engine/session factory for SQLite.
 """
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -12,7 +12,7 @@ from app.config import DB_PATH
 from app.models import Base
 
 
-def get_database_url(db_path=None) -> str:
+def get_database_url(db_path: str | None = None) -> str:
     """Get SQLite database URL.
 
     Args:
@@ -39,7 +39,9 @@ def create_db_engine(db_path=None, echo: bool = False):
     return create_engine(
         url,
         echo=echo,
-        # SQLite-specific: enable foreign keys
+        # check_same_thread=False allows SQLite connections to be used across threads.
+        # This is safe because we use sessionmaker with autoflush=False and require
+        # explicit session management (one session per unit of work, no sharing).
         connect_args={"check_same_thread": False},
     )
 
@@ -126,6 +128,11 @@ def register_feature_spec(
     - If alias present and stored feature_spec_id matches: no-op
     - If alias present but differs: raise FeatureSpecAliasCollision
 
+    Note:
+        This function does NOT commit the transaction. It calls session.flush()
+        to assign the row but leaves commit responsibility to the caller.
+        Caller must call session.commit() (or manage the transaction) to persist.
+
     Args:
         session: Active database session.
         feature_spec_id: Human-readable canonical feature spec identifier.
@@ -137,8 +144,6 @@ def register_feature_spec(
     Raises:
         FeatureSpecAliasCollision: If alias exists with different spec_id.
     """
-    from datetime import datetime
-
     from app.models import FeatureSpec
     from app.utils.hashing import feature_spec_alias
 

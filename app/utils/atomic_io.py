@@ -43,7 +43,7 @@ def atomic_write_bytes(
         os.write(fd, data)
         # Flush to OS buffers
         os.fsync(fd)
-    except Exception:
+    except OSError:
         # Close fd and cleanup orphan temp file on write/fsync failure
         os.close(fd)
         try:
