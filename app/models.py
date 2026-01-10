@@ -151,9 +151,7 @@ class StageLock(Base):
 
     # Unique constraint on lock key (with nullable feature_spec_alias)
     __table_args__ = (
-        UniqueConstraint(
-            "asset_id", "stage", "feature_spec_alias", name="uq_stage_lock_key"
-        ),
+        UniqueConstraint("asset_id", "stage", "feature_spec_alias", name="uq_stage_lock_key"),
         Index("ix_locks_acquired_at", "acquired_at"),
     )
 
@@ -220,8 +218,6 @@ class ArtifactIndex(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
-        UniqueConstraint(
-            "asset_id", "artifact_type", "feature_spec_alias", name="uq_artifact_key"
-        ),
+        UniqueConstraint("asset_id", "artifact_type", "feature_spec_alias", name="uq_artifact_key"),
         Index("ix_artifact_type", "artifact_type"),
     )

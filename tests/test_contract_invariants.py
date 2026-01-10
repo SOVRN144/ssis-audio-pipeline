@@ -59,8 +59,7 @@ class TestSegmentsInvariants:
         validate_schema(valid_segments, schema)
         for seg in valid_segments["segments"]:
             assert seg["end_sec"] >= seg["start_sec"], (
-                f"Invariant violation: end_sec ({seg['end_sec']}) < "
-                f"start_sec ({seg['start_sec']})"
+                f"Invariant violation: end_sec ({seg['end_sec']}) < start_sec ({seg['start_sec']})"
             )
 
     def test_end_sec_lt_start_sec_fails_invariant(self, schema):
@@ -210,8 +209,7 @@ class TestPreviewFeedbackInvariants:
         end = valid_feedback.get("preview_end_sec")
         if start is not None and end is not None:
             assert end >= start, (
-                f"Invariant violation: preview_end_sec ({end}) < "
-                f"preview_start_sec ({start})"
+                f"Invariant violation: preview_end_sec ({end}) < preview_start_sec ({start})"
             )
 
     def test_preview_times_invalid_invariant(self, schema):

@@ -119,8 +119,8 @@ class TestRegisterFeatureSpec:
             # Should not create duplicate (SQLAlchemy 2.0 style)
             from sqlalchemy import func
 
-            count_stmt = select(func.count()).select_from(FeatureSpec).where(
-                FeatureSpec.alias == alias1
+            count_stmt = (
+                select(func.count()).select_from(FeatureSpec).where(FeatureSpec.alias == alias1)
             )
             count = session.execute(count_stmt).scalar()
             assert count == 1
@@ -150,9 +150,7 @@ class TestRegisterFeatureSpec:
 
             # Patch feature_spec_alias at the source module to return the same alias
             # This simulates a hash collision
-            with mock.patch(
-                "app.utils.hashing.feature_spec_alias", return_value=alias1
-            ):
+            with mock.patch("app.utils.hashing.feature_spec_alias", return_value=alias1):
                 with pytest.raises(FeatureSpecAliasCollision) as exc_info:
                     register_feature_spec(session, spec_id_2)
 
