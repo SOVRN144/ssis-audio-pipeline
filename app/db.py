@@ -3,8 +3,6 @@
 SQLAlchemy sync engine/session factory for SQLite.
 """
 
-from datetime import UTC, datetime
-
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -40,8 +38,8 @@ def create_db_engine(db_path=None, echo: bool = False):
         url,
         echo=echo,
         # check_same_thread=False allows SQLite connections to be used across threads.
-        # This is safe because we use sessionmaker with autoflush=False and require
-        # explicit session management (one session per unit of work, no sharing).
+        # This is safe given our session management discipline (see create_session_factory):
+        # one session per unit of work, no sharing across threads.
         connect_args={"check_same_thread": False},
     )
 
@@ -158,7 +156,6 @@ def register_feature_spec(
         new_spec = FeatureSpec(
             alias=alias,
             feature_spec_id=feature_spec_id,
-            created_at=datetime.now(UTC),
             notes=notes,
         )
         session.add(new_spec)

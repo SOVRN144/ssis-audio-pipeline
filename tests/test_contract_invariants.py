@@ -9,6 +9,7 @@ These tests enforce invariants at the contract expectations layer:
 
 import json
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pytest
@@ -16,16 +17,17 @@ import pytest
 SPECS_DIR = Path(__file__).parent.parent / "specs"
 
 
-def load_schema(name: str) -> dict:
+def load_schema(name: str) -> dict[str, Any]:
     """Load a JSON schema from the specs directory."""
     schema_path = SPECS_DIR / f"{name}.schema.json"
-    with open(schema_path) as f:
-        return json.load(f)
+    return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
-def validate_schema(instance: dict, schema: dict) -> None:
+def validate_schema(instance: dict[str, Any], schema: dict[str, Any]) -> None:
     """Validate instance against schema using jsonschema."""
-    jsonschema.validate(instance, schema)
+    validator_cls = jsonschema.validators.validator_for(schema)
+    validator = validator_cls(schema, format_checker=jsonschema.FormatChecker())
+    validator.validate(instance)
 
 
 class TestSegmentsInvariants:
