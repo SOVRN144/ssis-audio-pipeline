@@ -77,22 +77,6 @@ def init_db(db_path=None, echo: bool = False) -> tuple:
     return engine, SessionFactory
 
 
-def get_session(session_factory: sessionmaker) -> Session:
-    """Get a new database session from a session factory.
-
-    Args:
-        session_factory: A sessionmaker instance (from create_session_factory or init_db).
-
-    Returns:
-        New Session instance. Caller is responsible for closing.
-
-    Note:
-        Prefer using the session factory directly: `session = SessionFactory()`
-        or use init_db() which returns (engine, SessionFactory).
-    """
-    return session_factory()
-
-
 # --- FeatureSpec Immutability Primitive ---
 
 
@@ -142,6 +126,7 @@ def register_feature_spec(
     Raises:
         FeatureSpecAliasCollision: If alias exists with different spec_id.
     """
+    # Local imports to avoid circular import (db -> models -> db).
     from app.models import FeatureSpec
     from app.utils.hashing import feature_spec_alias
 
