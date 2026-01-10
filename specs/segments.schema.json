@@ -37,6 +37,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "$comment": "Invariant: end_sec >= start_sec (enforced in runtime validation, not expressible in JSON Schema 2020-12 without $data).",
         "required": ["label", "start_sec", "end_sec"],
         "additionalProperties": false,
         "properties": {
@@ -82,6 +83,9 @@
     },
     "class_distribution": {
       "type": ["object", "null"],
+      "propertyNames": {
+        "enum": ["speech", "music", "noise", "silence"]
+      },
       "additionalProperties": {
         "type": "number",
         "minimum": 0

@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "preview_feedback.v1",
+  "$comment": "Invariant: when both preview_start_sec and preview_end_sec are provided, preview_end_sec >= preview_start_sec (enforced in runtime validation, not expressible in JSON Schema 2020-12 without $data).",
   "title": "PreviewFeedback",
   "description": "User feedback on preview selection (optional future contract for learning)",
   "type": "object",

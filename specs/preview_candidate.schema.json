@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "preview_candidate.v1",
+  "$comment": "Invariant: end_sec >= start_sec (enforced in runtime validation, not expressible in JSON Schema 2020-12 without $data).",
   "title": "PreviewCandidate",
   "description": "Selected preview window for an audio asset",
   "type": "object",
