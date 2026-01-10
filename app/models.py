@@ -129,6 +129,8 @@ class StageLock(Base):
 
     Lock key: (asset_id, stage, feature_spec_alias|null)
     Per Blueprint section 7.
+
+    TTL reclamation: locks with expires_at < now can be reclaimed by orchestrator.
     """
 
     __tablename__ = "stage_locks"
@@ -148,11 +150,15 @@ class StageLock(Base):
     acquired_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    # Explicit expiry timestamp (acquired_at + TTL). Locks with expires_at < now
+    # are eligible for reclamation. Set at lock creation time.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     # Unique constraint on lock key (with nullable feature_spec_alias)
     __table_args__ = (
         UniqueConstraint("asset_id", "stage", "feature_spec_alias", name="uq_stage_lock_key"),
         Index("ix_locks_acquired_at", "acquired_at"),
+        Index("ix_locks_expires_at", "expires_at"),
     )
 
 

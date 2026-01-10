@@ -1,18 +1,21 @@
 """Tests for app.db module and FeatureSpec immutability."""
 
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
 import pytest
 from sqlalchemy import select
 
+from app.config import STAGE_LOCK_TTL_SECONDS
 from app.db import (
     FeatureSpecAliasCollision,
+    create_stage_lock,
     init_db,
     register_feature_spec,
 )
-from app.models import FeatureSpec
+from app.models import FeatureSpec, StageLock
 from app.utils.hashing import feature_spec_alias
 
 
@@ -214,3 +217,108 @@ class TestFeatureSpecAliasCollisionException:
         assert "abc123" in msg
         assert "old_spec" in msg
         assert "new_spec" in msg
+
+
+class TestCreateStageLock:
+    """Tests for StageLock creation primitive."""
+
+    def test_creates_lock_with_expires_at(self, temp_db):
+        """create_stage_lock should set expires_at based on TTL."""
+        _, engine, SessionFactory = temp_db
+        session = SessionFactory()
+
+        try:
+            lock = create_stage_lock(
+                session,
+                asset_id="test-asset-001",
+                stage="normalize",
+                worker_id="worker-001",
+            )
+            session.commit()
+
+            # Verify lock was created
+            assert lock.id is not None
+            assert lock.asset_id == "test-asset-001"
+            assert lock.stage == "normalize"
+            assert lock.worker_id == "worker-001"
+            assert lock.feature_spec_alias is None
+
+            # Verify timestamps
+            assert lock.acquired_at is not None
+            assert lock.expires_at is not None
+
+            # expires_at should be >= acquired_at + TTL (with small tolerance for timing)
+            expected_expires = lock.acquired_at + timedelta(seconds=STAGE_LOCK_TTL_SECONDS)
+            # Allow 1 second tolerance for test execution timing
+            assert abs((lock.expires_at - expected_expires).total_seconds()) < 1
+        finally:
+            session.close()
+
+    def test_creates_lock_with_feature_spec_alias(self, temp_db):
+        """create_stage_lock should support feature_spec_alias."""
+        _, engine, SessionFactory = temp_db
+        session = SessionFactory()
+
+        try:
+            lock = create_stage_lock(
+                session,
+                asset_id="test-asset-002",
+                stage="features",
+                worker_id="worker-002",
+                feature_spec_alias="abc123def456",
+            )
+            session.commit()
+
+            assert lock.feature_spec_alias == "abc123def456"
+            assert lock.expires_at > lock.acquired_at
+        finally:
+            session.close()
+
+    def test_creates_lock_with_custom_ttl(self, temp_db):
+        """create_stage_lock should respect custom TTL."""
+        _, engine, SessionFactory = temp_db
+        session = SessionFactory()
+
+        try:
+            custom_ttl = 120  # 2 minutes
+            lock = create_stage_lock(
+                session,
+                asset_id="test-asset-003",
+                stage="segment",
+                worker_id="worker-003",
+                ttl_seconds=custom_ttl,
+            )
+            session.commit()
+
+            expected_expires = lock.acquired_at + timedelta(seconds=custom_ttl)
+            # Allow 1 second tolerance
+            assert abs((lock.expires_at - expected_expires).total_seconds()) < 1
+        finally:
+            session.close()
+
+    def test_lock_persists_in_database(self, temp_db):
+        """StageLock should be retrievable from database after commit."""
+        _, engine, SessionFactory = temp_db
+        session = SessionFactory()
+
+        try:
+            lock = create_stage_lock(
+                session,
+                asset_id="test-asset-004",
+                stage="preview",
+                worker_id="worker-004",
+            )
+            session.commit()
+            lock_id = lock.id
+
+            # Query back from database
+            stmt = select(StageLock).where(StageLock.id == lock_id)
+            retrieved = session.execute(stmt).scalar_one()
+
+            assert retrieved.asset_id == "test-asset-004"
+            assert retrieved.stage == "preview"
+            assert retrieved.worker_id == "worker-004"
+            assert retrieved.expires_at is not None
+            assert retrieved.expires_at > retrieved.acquired_at
+        finally:
+            session.close()

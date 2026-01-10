@@ -3,11 +3,19 @@
 SQLAlchemy sync engine/session factory for SQLite.
 """
 
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.config import DB_PATH
-from app.models import Base
+from app.config import DB_PATH, STAGE_LOCK_TTL_SECONDS
+from app.models import Base, utc_now
+
+if TYPE_CHECKING:
+    from app.models import StageLock
 
 
 def get_database_url(db_path: str | None = None) -> str:
@@ -161,3 +169,54 @@ def register_feature_spec(
         )
 
     return alias
+
+
+# --- StageLock Creation Primitive ---
+
+
+def create_stage_lock(
+    session: Session,
+    asset_id: str,
+    stage: str,
+    worker_id: str,
+    feature_spec_alias: str | None = None,
+    ttl_seconds: int | None = None,
+) -> StageLock:
+    """Create a new StageLock with proper expires_at calculation.
+
+    This is a primitive for creating stage locks. It sets acquired_at to now
+    and expires_at to acquired_at + TTL. Does NOT handle lock acquisition logic
+    (checking existing locks, reclamation, etc.) - that belongs in orchestrator.
+
+    Note:
+        This function does NOT commit the transaction. It calls session.flush()
+        to assign the row but leaves commit responsibility to the caller.
+
+    Args:
+        session: Active database session.
+        asset_id: The asset ID to lock.
+        stage: The pipeline stage name.
+        worker_id: The worker acquiring the lock.
+        feature_spec_alias: Optional feature spec alias (for feature stage locks).
+        ttl_seconds: Optional TTL override. Defaults to STAGE_LOCK_TTL_SECONDS.
+
+    Returns:
+        The created StageLock instance (flushed but not committed).
+    """
+    # Local import to avoid circular import
+    from app.models import StageLock
+
+    ttl = ttl_seconds if ttl_seconds is not None else STAGE_LOCK_TTL_SECONDS
+    now = utc_now()
+
+    lock = StageLock(
+        asset_id=asset_id,
+        stage=stage,
+        worker_id=worker_id,
+        feature_spec_alias=feature_spec_alias,
+        acquired_at=now,
+        expires_at=now + timedelta(seconds=ttl),
+    )
+    session.add(lock)
+    session.flush()
+    return lock
