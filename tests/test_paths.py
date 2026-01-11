@@ -153,3 +153,84 @@ class TestPathsDoNotCreateDirectories:
         path = features_h5_path("nonexistent_asset", "alias123456")
         # Just verify it returns a path without side effects
         assert isinstance(path, Path)
+
+
+class TestBlueprintCanonicalPathPatterns:
+    """Verify Blueprint canonical runtime path patterns (CLAUDE.md).
+
+    Blueprint patterns:
+    - data/audio/{asset_id}/original.<ext>
+    - data/audio/{asset_id}/normalized.wav
+    - data/features/{asset_id}.{feature_spec_alias}.h5
+    - data/segments/{asset_id}.segments.v1.json
+    - data/preview/{asset_id}.preview.v1.json
+    """
+
+    # Sample values per task specification
+    ASSET_ID = "asset_123"
+    FEATURE_SPEC_ALIAS = "abc123def456"
+    EXT = "mp3"
+
+    def test_audio_original_matches_blueprint_pattern(self):
+        """Verify: data/audio/{asset_id}/original.<ext>"""
+        path = audio_original_path(self.ASSET_ID, self.EXT)
+
+        # Parent directory must be data/audio/{asset_id}
+        assert path.parent.parent == AUDIO_DIR
+        assert path.parent.name == self.ASSET_ID
+
+        # Filename must be original.<ext>
+        assert path.name == f"original.{self.EXT}"
+
+    def test_audio_normalized_matches_blueprint_pattern(self):
+        """Verify: data/audio/{asset_id}/normalized.wav"""
+        path = audio_normalized_path(self.ASSET_ID)
+
+        # Parent directory must be data/audio/{asset_id}
+        assert path.parent.parent == AUDIO_DIR
+        assert path.parent.name == self.ASSET_ID
+
+        # Filename must be exactly normalized.wav
+        assert path.name == "normalized.wav"
+
+    def test_features_matches_blueprint_pattern(self):
+        """Verify: data/features/{asset_id}.{feature_spec_alias}.h5"""
+        path = features_h5_path(self.ASSET_ID, self.FEATURE_SPEC_ALIAS)
+
+        # Parent directory must be data/features
+        assert path.parent == FEATURES_DIR
+
+        # Filename must include asset_id and feature_spec_alias with dot separator
+        expected_name = f"{self.ASSET_ID}.{self.FEATURE_SPEC_ALIAS}.h5"
+        assert path.name == expected_name
+
+        # Verify dot separator between asset_id and feature_spec_alias
+        parts = path.stem.split(".")
+        assert parts[0] == self.ASSET_ID
+        assert parts[1] == self.FEATURE_SPEC_ALIAS
+
+    def test_segments_matches_blueprint_pattern(self):
+        """Verify: data/segments/{asset_id}.segments.v1.json"""
+        path = segments_json_path(self.ASSET_ID)
+
+        # Parent directory must be data/segments
+        assert path.parent == SEGMENTS_DIR
+
+        # Filename must end with exact suffix .segments.v1.json
+        assert path.name.endswith(".segments.v1.json")
+
+        # Filename must start with asset_id
+        assert path.name == f"{self.ASSET_ID}.segments.v1.json"
+
+    def test_preview_matches_blueprint_pattern(self):
+        """Verify: data/preview/{asset_id}.preview.v1.json"""
+        path = preview_json_path(self.ASSET_ID)
+
+        # Parent directory must be data/preview
+        assert path.parent == PREVIEW_DIR
+
+        # Filename must end with exact suffix .preview.v1.json
+        assert path.name.endswith(".preview.v1.json")
+
+        # Filename must start with asset_id
+        assert path.name == f"{self.ASSET_ID}.preview.v1.json"
