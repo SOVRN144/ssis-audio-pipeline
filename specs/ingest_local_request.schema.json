@@ -15,10 +15,12 @@
     },
     "owner_entity_id": {
       "type": ["string", "null"],
+      "minLength": 1,
       "description": "Optional owner entity ID for idempotency enforcement"
     },
     "original_filename": {
       "type": ["string", "null"],
+      "minLength": 1,
       "description": "Override filename (defaults to basename of source_path)"
     },
     "metadata": {
