@@ -146,6 +146,7 @@ def ingest_local(
             source_path=request.source_path,
             owner_entity_id=request.owner_entity_id,
             original_filename=request.original_filename,
+            metadata=request.metadata,
         )
         return IngestSuccessResponse(
             asset_id=result.asset_id,
@@ -198,26 +199,27 @@ async def ingest_upload(
     Idempotency rule same as /v1/ingest/local.
     """
     # Parse metadata if provided
+    parsed_metadata = None
     if metadata is not None:
         try:
-            json.loads(metadata)  # Validate JSON
-        except json.JSONDecodeError as e:
+            parsed_metadata = json.loads(metadata)
+        except json.JSONDecodeError:
             return make_error_response(
                 IngestErrorCode.INGEST_FAILED,
-                f"Invalid metadata JSON: {e}",
+                "Invalid metadata JSON",
             )
 
     # Determine filename
     upload_filename = file.filename or "unknown"
-    effective_filename = original_filename or upload_filename
 
     try:
         result = ingest_upload_stream(
             session=session,
             stream=file.file,
-            filename=effective_filename,
+            filename=upload_filename,
             owner_entity_id=owner_entity_id,
             original_filename=original_filename,
+            metadata=parsed_metadata,
         )
         return IngestSuccessResponse(
             asset_id=result.asset_id,

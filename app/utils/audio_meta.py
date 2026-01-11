@@ -42,13 +42,13 @@ def extract_audio_metadata(path: str | Path) -> RawAudioMetadata:
         RawAudioMetadata with available fields filled in.
     """
     path = Path(path)
-    ext = path.suffix.lower().lstrip(".")
 
     # Initialize with format guess from extension
-    metadata = RawAudioMetadata(format_guess=ext if ext else None)
+    format_guess = guess_format_from_extension(str(path))
+    metadata = RawAudioMetadata(format_guess=format_guess)
 
     # Try WAV extraction if it looks like a WAV file
-    if ext == "wav":
+    if format_guess == "wav":
         try:
             metadata = _extract_wav_metadata(path)
         except Exception:

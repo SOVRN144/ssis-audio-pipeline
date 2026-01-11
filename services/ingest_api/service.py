@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -106,6 +106,7 @@ def ingest_local_file(
     source_path: str | Path,
     owner_entity_id: str | None = None,
     original_filename: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> IngestResult:
     """Ingest a local audio file.
 
@@ -121,6 +122,7 @@ def ingest_local_file(
         source_path: Path to the local audio file.
         owner_entity_id: Optional owner for idempotency enforcement.
         original_filename: Override filename (defaults to basename of source_path).
+        metadata: Optional user-provided metadata (stored as JSON).
 
     Returns:
         IngestResult with asset_id, job_id, and is_duplicate flag.
@@ -129,6 +131,10 @@ def ingest_local_file(
         FileNotFoundIngestError: If source file does not exist.
         HashFailedError: If content hash cannot be computed.
         IngestFailedError: If file copy or DB operation fails.
+
+    Note:
+        This function commits the session on success (and on duplicate short-circuit).
+        Callers should not wrap it in a transaction expecting rollback.
     """
     source_path = Path(source_path)
 
@@ -174,7 +180,7 @@ def ingest_local_file(
         raise IngestFailedError(f"File copy failed: {e}") from e
 
     # 8. Extract audio metadata (best-effort, never fails)
-    metadata = extract_audio_metadata(dest_path)
+    audio_meta = extract_audio_metadata(dest_path)
 
     # 9. Insert AudioAsset record
     asset = AudioAsset(
@@ -183,10 +189,11 @@ def ingest_local_file(
         source_uri=str(dest_path),
         original_filename=effective_filename,
         owner_entity_id=owner_entity_id,
-        duration_sec=metadata.duration_sec,
-        sample_rate=metadata.sample_rate,
-        channels=metadata.channels,
-        format_guess=metadata.format_guess,
+        duration_sec=audio_meta.duration_sec,
+        sample_rate=audio_meta.sample_rate,
+        channels=audio_meta.channels,
+        format_guess=audio_meta.format_guess,
+        user_metadata=metadata,
     )
     session.add(asset)
 
@@ -218,6 +225,7 @@ def ingest_upload_stream(
     filename: str,
     owner_entity_id: str | None = None,
     original_filename: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> IngestResult:
     """Ingest an uploaded file from a stream.
 
@@ -231,6 +239,7 @@ def ingest_upload_stream(
         filename: Original filename from upload.
         owner_entity_id: Optional owner for idempotency enforcement.
         original_filename: Override filename (defaults to upload filename).
+        metadata: Optional user-provided metadata (stored as JSON).
 
     Returns:
         IngestResult with asset_id, job_id, and is_duplicate flag.
@@ -238,6 +247,10 @@ def ingest_upload_stream(
     Raises:
         HashFailedError: If content hash cannot be computed.
         IngestFailedError: If write or DB operation fails.
+
+    Note:
+        This function commits the session on success (and on duplicate short-circuit).
+        Callers should not wrap it in a transaction expecting rollback.
     """
     import tempfile
 
@@ -291,7 +304,7 @@ def ingest_upload_stream(
             raise IngestFailedError(f"File copy failed: {e}") from e
 
         # 8. Extract audio metadata (best-effort)
-        metadata = extract_audio_metadata(dest_path)
+        audio_meta = extract_audio_metadata(dest_path)
 
         # 9. Insert AudioAsset record
         asset = AudioAsset(
@@ -300,10 +313,11 @@ def ingest_upload_stream(
             source_uri=str(dest_path),
             original_filename=effective_filename,
             owner_entity_id=owner_entity_id,
-            duration_sec=metadata.duration_sec,
-            sample_rate=metadata.sample_rate,
-            channels=metadata.channels,
-            format_guess=metadata.format_guess,
+            duration_sec=audio_meta.duration_sec,
+            sample_rate=audio_meta.sample_rate,
+            channels=audio_meta.channels,
+            format_guess=audio_meta.format_guess,
+            user_metadata=metadata,
         )
         session.add(asset)
 

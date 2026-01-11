@@ -160,6 +160,31 @@ class TestIngestLocal:
         finally:
             session.close()
 
+    def test_ingest_local_with_metadata(self, client, sample_audio_file):
+        """Should persist user-provided metadata."""
+        test_client, SessionFactory = client
+
+        response = test_client.post(
+            "/v1/ingest/local",
+            json={
+                "source_path": str(sample_audio_file),
+                "metadata": {"project": "test-project", "version": "1.0"},
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+
+        session = SessionFactory()
+        try:
+            stmt = select(AudioAsset).where(AudioAsset.asset_id == data["asset_id"])
+            asset = session.execute(stmt).scalar_one()
+            assert asset.user_metadata is not None
+            assert asset.user_metadata["project"] == "test-project"
+            assert asset.user_metadata["version"] == "1.0"
+        finally:
+            session.close()
+
 
 class TestIngestUpload:
     """Tests for POST /v1/ingest/upload endpoint."""
@@ -255,6 +280,32 @@ class TestIngestUpload:
         data = response.json()
         assert data["error_code"] == "INGEST_FAILED"
         assert "Invalid metadata JSON" in data["error_message"]
+
+    def test_ingest_upload_with_valid_metadata(self, client, sample_audio_file):
+        """Should persist user-provided metadata from upload."""
+        test_client, SessionFactory = client
+
+        import json
+
+        with open(sample_audio_file, "rb") as f:
+            response = test_client.post(
+                "/v1/ingest/upload",
+                files={"file": ("test.wav", f, "audio/wav")},
+                data={"metadata": json.dumps({"source": "upload-test", "quality": "high"})},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+
+        session = SessionFactory()
+        try:
+            stmt = select(AudioAsset).where(AudioAsset.asset_id == data["asset_id"])
+            asset = session.execute(stmt).scalar_one()
+            assert asset.user_metadata is not None
+            assert asset.user_metadata["source"] == "upload-test"
+            assert asset.user_metadata["quality"] == "high"
+        finally:
+            session.close()
 
 
 class TestRequestValidation:

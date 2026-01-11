@@ -200,9 +200,6 @@ def atomic_copy_file(
     finally:
         os.close(src_fd)
 
-    # Best-effort fsync on directory for rename durability
-    _fsync_directory(final_path.parent)
-
     # Atomic rename (POSIX guarantees atomicity)
     os.replace(temp_path, final_path)
 
@@ -263,9 +260,6 @@ def atomic_stream_to_file(
         raise
     else:
         os.close(fd)
-
-    # Best-effort fsync on directory
-    _fsync_directory(final_path.parent)
 
     # Atomic rename
     os.replace(temp_path, final_path)
