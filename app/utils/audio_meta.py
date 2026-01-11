@@ -10,8 +10,11 @@ from pathlib import Path
 
 
 @dataclass
-class AudioMetadata:
-    """Audio metadata extracted from file (best-effort).
+class RawAudioMetadata:
+    """Raw audio metadata extracted from file (best-effort).
+
+    This is the internal extraction result. For the validated Pydantic model,
+    see app.schemas.AudioMetadata.
 
     All fields may be None if extraction fails or is not supported.
     """
@@ -22,7 +25,7 @@ class AudioMetadata:
     format_guess: str | None = None
 
 
-def extract_audio_metadata(path: str | Path) -> AudioMetadata:
+def extract_audio_metadata(path: str | Path) -> RawAudioMetadata:
     """Extract metadata from an audio file using stdlib only.
 
     Best-effort extraction:
@@ -36,13 +39,13 @@ def extract_audio_metadata(path: str | Path) -> AudioMetadata:
         path: Path to the audio file.
 
     Returns:
-        AudioMetadata with available fields filled in.
+        RawAudioMetadata with available fields filled in.
     """
     path = Path(path)
     ext = path.suffix.lower().lstrip(".")
 
     # Initialize with format guess from extension
-    metadata = AudioMetadata(format_guess=ext if ext else None)
+    metadata = RawAudioMetadata(format_guess=ext if ext else None)
 
     # Try WAV extraction if it looks like a WAV file
     if ext == "wav":
@@ -55,14 +58,14 @@ def extract_audio_metadata(path: str | Path) -> AudioMetadata:
     return metadata
 
 
-def _extract_wav_metadata(path: Path) -> AudioMetadata:
+def _extract_wav_metadata(path: Path) -> RawAudioMetadata:
     """Extract metadata from a WAV file using stdlib wave module.
 
     Args:
         path: Path to the WAV file.
 
     Returns:
-        AudioMetadata with WAV-specific fields.
+        RawAudioMetadata with WAV-specific fields.
 
     Raises:
         Exception: If wave module cannot read the file.
@@ -75,7 +78,7 @@ def _extract_wav_metadata(path: Path) -> AudioMetadata:
         # Calculate duration
         duration_sec = n_frames / sample_rate if sample_rate > 0 else None
 
-        return AudioMetadata(
+        return RawAudioMetadata(
             duration_sec=duration_sec,
             sample_rate=sample_rate,
             channels=channels,
@@ -98,7 +101,7 @@ def guess_format_from_extension(filename: str) -> str | None:
 
 
 __all__ = [
-    "AudioMetadata",
+    "RawAudioMetadata",
     "extract_audio_metadata",
     "guess_format_from_extension",
 ]

@@ -78,7 +78,7 @@ class IngestResult:
     """Result of a successful ingest operation."""
 
     asset_id: str
-    job_id: str
+    job_id: str | None
     is_duplicate: bool
 
 
@@ -341,11 +341,11 @@ def create_failed_ingest_job(
     error_code: str,
     error_message: str,
     asset_id: str | None = None,
-) -> str:
+) -> str | None:
     """Create a failed ingest job record.
 
     Used when ingest fails before an asset can be created.
-    If asset_id is None, uses a placeholder.
+    If asset_id is None, returns None (no job persisted).
 
     Args:
         session: Active database session.
@@ -354,13 +354,12 @@ def create_failed_ingest_job(
         asset_id: Optional asset ID if one was generated.
 
     Returns:
-        The generated job_id.
+        The generated job_id if persisted, None if not persisted.
     """
     # If no asset_id, we cannot create a proper job (FK constraint)
-    # In this case, we log the error but cannot persist to DB
-    # The API layer will handle returning the error to the client
+    # Return None to indicate no job was persisted
     if asset_id is None:
-        return generate_job_id()  # Return a job_id for API response
+        return None
 
     return _create_ingest_job(
         session,

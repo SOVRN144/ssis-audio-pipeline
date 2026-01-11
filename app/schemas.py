@@ -42,30 +42,6 @@ class IngestLocalRequest(BaseModel):
     )
 
 
-class IngestUploadRequest(BaseModel):
-    """Request payload for upload ingest (form fields only, file is separate).
-
-    The file itself is handled via UploadFile in FastAPI.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    owner_entity_id: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Optional owner entity ID for idempotency enforcement",
-    )
-    original_filename: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Override filename (defaults to uploaded filename)",
-    )
-    metadata: dict[str, Any] | None = Field(
-        default=None,
-        description="Optional additional metadata to store with the asset",
-    )
-
-
 # --- Response Models ---
 
 
@@ -76,7 +52,9 @@ class IngestSuccessResponse(BaseModel):
 
     status: str = Field(default="success", description="Operation status")
     asset_id: str = Field(..., description="Unique identifier for the ingested asset")
-    job_id: str = Field(..., description="Unique identifier for the ingest job")
+    job_id: str | None = Field(
+        ..., description="Unique identifier for the ingest job (null if not persisted)"
+    )
     is_duplicate: bool = Field(
         default=False,
         description="True if asset already existed (idempotent ingest)",
@@ -158,7 +136,6 @@ class PipelineJobResponse(BaseModel):
 
 __all__ = [
     "IngestLocalRequest",
-    "IngestUploadRequest",
     "IngestSuccessResponse",
     "IngestErrorResponse",
     "AudioMetadata",

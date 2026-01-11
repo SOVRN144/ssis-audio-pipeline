@@ -13,6 +13,36 @@ import os
 from pathlib import Path
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write all bytes to a file descriptor, handling partial writes.
+
+    Loops until all bytes are written, handling short writes and EINTR.
+    This prevents silent data truncation when os.write() doesn't write
+    the full buffer in one call (which can happen on pipes, sockets,
+    or under heavy I/O load).
+
+    Args:
+        fd: File descriptor to write to.
+        data: Bytes to write.
+
+    Raises:
+        OSError: If write fails or returns 0 bytes unexpectedly.
+    """
+    total_written = 0
+    data_len = len(data)
+
+    while total_written < data_len:
+        try:
+            written = os.write(fd, data[total_written:])
+            if written == 0:
+                # os.write() should never return 0 for non-empty data
+                raise OSError("os.write() returned 0 bytes unexpectedly")
+            total_written += written
+        except InterruptedError:
+            # EINTR: interrupted system call, retry the write
+            continue
+
+
 def atomic_write_bytes(
     final_path: str | Path,
     data: bytes,
@@ -40,7 +70,7 @@ def atomic_write_bytes(
     # Write to temp file with cleanup on failure
     fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
-        os.write(fd, data)
+        _write_all(fd, data)
         # Flush to OS buffers
         os.fsync(fd)
     except OSError:
@@ -153,7 +183,7 @@ def atomic_copy_file(
                 chunk = os.read(src_fd, chunk_size)
                 if not chunk:
                     break
-                os.write(dst_fd, chunk)
+                _write_all(dst_fd, chunk)
 
             # Flush to OS buffers
             os.fsync(dst_fd)
@@ -218,7 +248,7 @@ def atomic_stream_to_file(
                 break
             if isinstance(chunk, str):
                 chunk = chunk.encode("utf-8")
-            os.write(fd, chunk)
+            _write_all(fd, chunk)
             total_bytes += len(chunk)
 
         # Flush to OS buffers

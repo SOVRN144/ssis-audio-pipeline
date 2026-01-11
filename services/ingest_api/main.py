@@ -12,6 +12,7 @@ Run with:
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -31,6 +32,8 @@ from services.ingest_api.service import (
     ingest_upload_stream,
 )
 
+logger = logging.getLogger(__name__)
+
 # --- Database Setup ---
 
 # Module-level session factory (initialized on startup)
@@ -38,10 +41,14 @@ _session_factory = None
 
 
 def get_session_factory():
-    """Get the session factory, initializing if needed."""
+    """Get the session factory.
+
+    Raises:
+        RuntimeError: If session factory not initialized (app lifespan not invoked).
+    """
     global _session_factory
     if _session_factory is None:
-        _, _session_factory = init_db()
+        raise RuntimeError("Session factory not initialized. App lifespan not invoked?")
     return _session_factory
 
 
@@ -153,10 +160,12 @@ def ingest_local(
         return make_error_response(e.error_code, e.message)
     except IngestError as e:
         return make_error_response(e.error_code, e.message)
-    except Exception as e:
+    except Exception:
+        # Log full exception server-side, return generic message to client
+        logger.exception("Unexpected error during local ingest")
         return make_error_response(
             IngestErrorCode.INGEST_FAILED,
-            f"Unexpected error: {e}",
+            "An unexpected error occurred during ingest",
         )
 
 
@@ -221,10 +230,12 @@ async def ingest_upload(
         return make_error_response(e.error_code, e.message)
     except IngestError as e:
         return make_error_response(e.error_code, e.message)
-    except Exception as e:
+    except Exception:
+        # Log full exception server-side, return generic message to client
+        logger.exception("Unexpected error during upload ingest")
         return make_error_response(
             IngestErrorCode.INGEST_FAILED,
-            f"Unexpected error: {e}",
+            "An unexpected error occurred during ingest",
         )
 
 

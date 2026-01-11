@@ -7,6 +7,7 @@ Tests atomic file copy semantics:
 """
 
 import io
+import os
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -113,7 +114,7 @@ class TestAtomicCopyFile:
             source.write_bytes(b"x" * 1000)
 
             # Mock os.write to fail after partial write
-            original_write = __builtins__["__import__"]("os").write
+            original_write = os.write
 
             def failing_write(fd, data):
                 # Write some data then fail

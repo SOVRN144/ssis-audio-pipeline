@@ -1,69 +1,12 @@
 """Tests for the Ingest API endpoints."""
 
 import tempfile
-import wave
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.db import init_db
 from app.models import AudioAsset, PipelineJob
-from services.ingest_api.main import app, get_db_session, override_session_factory
-
-
-@pytest.fixture
-def temp_db():
-    """Create a temporary database for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        engine, SessionFactory = init_db(db_path)
-        override_session_factory(SessionFactory)
-        yield db_path, engine, SessionFactory
-        engine.dispose()
-
-
-@pytest.fixture
-def client(temp_db):
-    """Create a test client with temp database."""
-    db_path, engine, SessionFactory = temp_db
-
-    # Override the dependency
-    def get_test_session():
-        session = SessionFactory()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db_session] = get_test_session
-
-    with TestClient(app) as client:
-        yield client, SessionFactory
-
-    app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def sample_audio_file():
-    """Create a sample WAV audio file for testing."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        # Create a minimal valid WAV file
-        with wave.open(f.name, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(22050)
-            # Write 1 second of silence (22050 samples * 2 bytes)
-            wf.writeframes(b"\x00" * 22050 * 2)
-
-        yield Path(f.name)
-
-    # Cleanup
-    try:
-        Path(f.name).unlink()
-    except OSError:
-        pass
 
 
 @pytest.fixture
