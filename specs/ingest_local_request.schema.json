@@ -23,7 +23,11 @@
     },
     "metadata": {
       "type": ["object", "null"],
-      "description": "Optional additional metadata to store with the asset"
+      "description": "Optional additional metadata to store with the asset",
+      "maxProperties": 50,
+      "propertyNames": {
+        "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+      }
     }
   }
 }
