@@ -62,7 +62,7 @@ def test_schema_parses_as_draft202012(schema_path: Path) -> None:
     # Validate schema itself is well-formed
     try:
         validator_cls.check_schema(schema)
-    except (SchemaError, Exception) as e:
+    except SchemaError as e:
         pytest.fail(f"{schema_path.name}: Schema self-validation failed: {e}")
 
 
