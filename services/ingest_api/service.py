@@ -10,9 +10,11 @@ NO orchestrator logic, NO workers, NO Huey. Step 2 scope only.
 
 from __future__ import annotations
 
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,7 +34,7 @@ if TYPE_CHECKING:
 # --- Error Codes (Blueprint section 8) ---
 
 
-class IngestErrorCode:
+class IngestErrorCode(StrEnum):
     """Error codes for ingest stage per Blueprint section 8."""
 
     FILE_NOT_FOUND = "FILE_NOT_FOUND"
@@ -175,7 +177,7 @@ def ingest_local_file(
     try:
         atomic_copy_file(source_path, dest_path)
     except FileNotFoundError as e:
-        raise FileNotFoundIngestError(str(source_path)) from e
+        raise IngestFailedError(f"File copy failed (source or destination issue): {e}") from e
     except OSError as e:
         raise IngestFailedError(f"File copy failed: {e}") from e
 
@@ -252,8 +254,6 @@ def ingest_upload_stream(
         This function commits the session on success (and on duplicate short-circuit).
         Callers should not wrap it in a transaction expecting rollback.
     """
-    import tempfile
-
     # 1. Determine effective filename and extension
     effective_filename = original_filename or filename
     ext = guess_format_from_extension(effective_filename) or "bin"
@@ -268,6 +268,7 @@ def ingest_upload_stream(
                 if not chunk:
                     break
                 tmp.write(chunk)
+            tmp.flush()
     except OSError as e:
         raise IngestFailedError(f"Failed to write temp file: {e}") from e
 

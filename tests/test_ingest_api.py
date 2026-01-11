@@ -1,5 +1,6 @@
 """Tests for the Ingest API endpoints."""
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -284,8 +285,6 @@ class TestIngestUpload:
     def test_ingest_upload_with_valid_metadata(self, client, sample_audio_file):
         """Should persist user-provided metadata from upload."""
         test_client, SessionFactory = client
-
-        import json
 
         with open(sample_audio_file, "rb") as f:
             response = test_client.post(
