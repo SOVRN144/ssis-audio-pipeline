@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from jsonschema.validators import validator_for
 
 SPECS_DIR = Path(__file__).parent.parent / "specs"
@@ -61,7 +62,7 @@ def test_schema_parses_as_draft202012(schema_path: Path) -> None:
     # Validate schema itself is well-formed
     try:
         validator_cls.check_schema(schema)
-    except Exception as e:
+    except (SchemaError, Exception) as e:
         pytest.fail(f"{schema_path.name}: Schema self-validation failed: {e}")
 
 
