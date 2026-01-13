@@ -5,6 +5,10 @@ description = "SSIS Audio Pipeline - Blueprint #1: Multi-stage audio processing 
 requires-python = ">=3.11"
 dependencies = [
     "sqlalchemy>=2.0,<3",
+    "fastapi>=0.109,<1",
+    "python-multipart>=0.0.6,<1",
+    "pydantic>=2.5,<3",
+    "uvicorn>=0.24,<1",
 ]
 
 [project.optional-dependencies]
@@ -13,6 +17,7 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.7.0",
     "jsonschema>=4.20.0",
+    "httpx>=0.25.0",
 ]
 
 [build-system]

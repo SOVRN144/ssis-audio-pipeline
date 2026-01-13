@@ -11,6 +11,7 @@ Database tables per Blueprint section 7:
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     ForeignKey,
     Index,
@@ -62,6 +63,9 @@ class AudioAsset(Base):
     sample_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
     channels: Mapped[int | None] = mapped_column(Integer, nullable=True)
     format_guess: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # Optional user-provided metadata (JSON)
+    user_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
