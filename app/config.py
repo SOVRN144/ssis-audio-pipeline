@@ -22,6 +22,10 @@ LOGS_DIR = REPO_ROOT / "logs"
 # Database path
 DB_PATH = DATA_DIR / "ssis.db"
 
+# Queue directory and Huey database path (Blueprint section 9)
+QUEUE_DIR = DATA_DIR / "queue"
+HUEY_DB_PATH = QUEUE_DIR / "huey.db"
+
 # Stage lock TTL in seconds (Blueprint section 7: ~10 minutes)
 STAGE_LOCK_TTL_SECONDS = 600
 
@@ -31,3 +35,9 @@ CANONICAL_CHANNELS = 1
 
 # Default feature spec ID (Blueprint v1.4 locked default)
 DEFAULT_FEATURE_SPEC_ID = "mel64_h10ms_w25ms_sr22050__yamnet1024_h0.5s_onnx"
+
+# Retry policy (Blueprint section 9 - LOCKED)
+# Maximum attempts before dead-letter
+MAX_RETRY_ATTEMPTS = 3
+# Retry delays in seconds: 60s, 300s (5min), 900s (15min)
+RETRY_DELAYS_SECONDS = (60, 300, 900)

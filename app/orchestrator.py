@@ -1,0 +1,743 @@
+"""SSIS Audio Pipeline - Orchestrator logic.
+
+Implements stage planning, dispatch, retries, and dead-letter handling
+per Blueprint section 9.
+
+Stage progression: ingest -> decode -> features -> segments -> preview
+
+Step 3 scope:
+- Planning based on artifact existence + artifact_index
+- StageLock acquisition with TTL and stale reclamation
+- Retry policy: 3 attempts, delays 60s/300s/900s
+- Dead-letter after repeated failures
+
+Step 3 does NOT implement actual worker processing (decode/normalize/features).
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import TYPE_CHECKING
+
+from sqlalchemy import and_, select
+
+from app.config import (
+    MAX_RETRY_ATTEMPTS,
+    RETRY_DELAYS_SECONDS,
+)
+from app.db import create_stage_lock, init_db
+from app.models import ArtifactIndex, PipelineJob, StageLock, utc_now
+from app.utils.paths import audio_normalized_path
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+# --- Stage Definitions ---
+
+# Stage that follows ingest (Step 3 scope)
+STAGE_DECODE = "decode"
+
+# Artifact type for decode stage output
+ARTIFACT_TYPE_NORMALIZED_WAV = "normalized_wav"
+
+
+# --- Orchestrator Tick ---
+
+
+def orchestrator_tick(asset_id: str) -> dict:
+    """Run orchestrator planning and dispatch for an asset.
+
+    This is the main entry point called by Huey task.
+    Idempotent: safe to call multiple times.
+
+    Args:
+        asset_id: The asset ID to process.
+
+    Returns:
+        Dict describing what happened (for logging/debugging).
+    """
+    # Get a fresh session for this tick
+    _, SessionFactory = init_db()
+    session = SessionFactory()
+
+    try:
+        result = _orchestrator_tick_impl(session, asset_id)
+        session.commit()
+        return result
+    except Exception as e:
+        session.rollback()
+        logger.exception("Orchestrator tick failed for asset_id=%s", asset_id)
+        return {"status": "error", "asset_id": asset_id, "error": str(e)}
+    finally:
+        session.close()
+
+
+def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
+    """Implementation of orchestrator tick.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID to process.
+
+    Returns:
+        Dict describing the result.
+    """
+    # 1. Check if ingest is completed for this asset
+    ingest_job = _find_completed_ingest_job(session, asset_id)
+    if ingest_job is None:
+        logger.debug("No completed ingest job for asset_id=%s", asset_id)
+        return {"status": "no_work", "asset_id": asset_id, "reason": "no_completed_ingest"}
+
+    # 2. Check for dead-letter jobs - skip if any stage is dead-lettered
+    dead_letter_job = _find_dead_letter_job(session, asset_id)
+    if dead_letter_job is not None:
+        logger.info(
+            "Asset %s has dead-letter job (stage=%s), skipping",
+            asset_id, dead_letter_job.stage
+        )
+        return {
+            "status": "skipped",
+            "asset_id": asset_id,
+            "reason": "dead_letter_exists",
+            "dead_letter_stage": dead_letter_job.stage,
+        }
+
+    # 3. Determine next stage (Step 3: only decode after ingest)
+    next_stage = _determine_next_stage(session, asset_id)
+    if next_stage is None:
+        logger.debug("No pending stages for asset_id=%s", asset_id)
+        return {"status": "no_work", "asset_id": asset_id, "reason": "all_stages_complete"}
+
+    # 4. Check if artifact already exists (skip if so)
+    if _artifact_exists(session, asset_id, next_stage):
+        logger.info("Artifact for stage %s already exists for asset_id=%s", next_stage, asset_id)
+        return {
+            "status": "skipped",
+            "asset_id": asset_id,
+            "stage": next_stage,
+            "reason": "artifact_exists",
+        }
+
+    # 5. Check for existing lock
+    lock_result = _handle_stage_lock(session, asset_id, next_stage)
+    if lock_result["action"] == "skip":
+        return {
+            "status": "skipped",
+            "asset_id": asset_id,
+            "stage": next_stage,
+            "reason": lock_result["reason"],
+        }
+
+    # 6. Create or update the PipelineJob for this stage
+    job = _get_or_create_stage_job(session, asset_id, next_stage)
+
+    # 7. Check if this is a retry scenario
+    if job.status == "failed" and job.attempt >= MAX_RETRY_ATTEMPTS:
+        # Should have been caught as dead_letter, but handle defensively
+        _mark_dead_letter(session, job, "Max attempts exceeded")
+        return {
+            "status": "dead_letter",
+            "asset_id": asset_id,
+            "stage": next_stage,
+            "job_id": job.job_id,
+        }
+
+    # 8. Update job status to running
+    job.status = "running"
+    job.started_at = utc_now()
+    session.flush()
+
+    # 9. Dispatch the stage worker task
+    from app.huey_app import enqueue_stage_worker
+    enqueue_stage_worker(job.job_id, asset_id, next_stage)
+
+    return {
+        "status": "dispatched",
+        "asset_id": asset_id,
+        "stage": next_stage,
+        "job_id": job.job_id,
+        "attempt": job.attempt,
+    }
+
+
+# --- Stage Execution ---
+
+
+def execute_stage(job_id: str, asset_id: str, stage: str) -> dict:
+    """Execute a pipeline stage.
+
+    Called by Huey worker task. Handles success/failure and retry logic.
+
+    Step 3: Stub implementation - marks as failed since no real workers exist.
+    Real workers will be implemented in Step 4+.
+
+    Args:
+        job_id: The PipelineJob ID.
+        asset_id: The asset ID.
+        stage: The pipeline stage.
+
+    Returns:
+        Dict with execution result.
+    """
+    _, SessionFactory = init_db()
+    session = SessionFactory()
+
+    try:
+        result = _execute_stage_impl(session, job_id, asset_id, stage)
+        session.commit()
+        return result
+    except Exception as e:
+        session.rollback()
+        logger.exception("Stage execution failed: job_id=%s, stage=%s", job_id, stage)
+        # Handle failure in a new session
+        session2 = SessionFactory()
+        try:
+            _handle_stage_failure(session2, job_id, "WORKER_ERROR", str(e))
+            session2.commit()
+        except Exception:
+            session2.rollback()
+        finally:
+            session2.close()
+        return {"status": "error", "job_id": job_id, "stage": stage, "error": str(e)}
+    finally:
+        session.close()
+
+
+def _execute_stage_impl(session: Session, job_id: str, asset_id: str, stage: str) -> dict:
+    """Implementation of stage execution.
+
+    Step 3: This is a stub that simulates work but does not actually process.
+    Real decode/normalize workers will be implemented in Step 4.
+
+    Args:
+        session: Database session.
+        job_id: The PipelineJob ID.
+        asset_id: The asset ID.
+        stage: The pipeline stage.
+
+    Returns:
+        Dict with execution result.
+    """
+    # Find the job
+    stmt = select(PipelineJob).where(PipelineJob.job_id == job_id)
+    job = session.execute(stmt).scalar_one_or_none()
+
+    if job is None:
+        logger.error("Job not found: job_id=%s", job_id)
+        return {"status": "error", "job_id": job_id, "error": "job_not_found"}
+
+    if stage == STAGE_DECODE:
+        # Step 3: Check if normalized.wav already exists (defensive)
+        normalized_path = audio_normalized_path(asset_id)
+        if normalized_path.exists():
+            # Artifact already exists - mark success and record in artifact_index
+            _record_artifact(session, asset_id, ARTIFACT_TYPE_NORMALIZED_WAV, str(normalized_path))
+            _mark_job_completed(session, job)
+            _release_stage_lock(session, asset_id, stage)
+            return {
+                "status": "completed",
+                "job_id": job_id,
+                "stage": stage,
+                "reason": "artifact_already_exists",
+            }
+
+        # Step 3: No real decode worker - fail with NOT_IMPLEMENTED
+        # This will trigger retry logic
+        logger.info("Decode worker not implemented (Step 3 stub): job_id=%s", job_id)
+        _handle_stage_failure(
+            session, job_id, "NOT_IMPLEMENTED", "Decode worker not implemented (Step 3)"
+        )
+        return {
+            "status": "failed",
+            "job_id": job_id,
+            "stage": stage,
+            "error_code": "NOT_IMPLEMENTED",
+            "reason": "step3_stub",
+        }
+
+    # Unknown stage
+    logger.error("Unknown stage: %s", stage)
+    _handle_stage_failure(session, job_id, "UNKNOWN_STAGE", f"Unknown stage: {stage}")
+    return {"status": "error", "job_id": job_id, "stage": stage, "error": "unknown_stage"}
+
+
+# --- Failure and Retry Handling ---
+
+
+def _handle_stage_failure(
+    session: Session, job_id: str, error_code: str, error_message: str
+) -> None:
+    """Handle a stage failure with retry logic.
+
+    Per Blueprint section 9:
+    - 3 attempts max
+    - Delays: 60s, 300s, 900s
+    - After 3 failures: dead-letter
+
+    Args:
+        session: Database session.
+        job_id: The PipelineJob ID.
+        error_code: Error code for taxonomy.
+        error_message: Human-readable error message.
+    """
+    stmt = select(PipelineJob).where(PipelineJob.job_id == job_id)
+    job = session.execute(stmt).scalar_one_or_none()
+
+    if job is None:
+        logger.error("Cannot handle failure - job not found: job_id=%s", job_id)
+        return
+
+    current_attempt = job.attempt
+    logger.info(
+        "Stage failure: job_id=%s, stage=%s, attempt=%d/%d, error=%s",
+        job_id, job.stage, current_attempt, MAX_RETRY_ATTEMPTS, error_code
+    )
+
+    if current_attempt >= MAX_RETRY_ATTEMPTS:
+        # Dead-letter
+        _mark_dead_letter(session, job, error_message, error_code)
+        _release_stage_lock(session, job.asset_id, job.stage)
+        return
+
+    # Increment attempt and schedule retry
+    job.attempt = current_attempt + 1
+    job.status = "failed"
+    job.error_code = error_code
+    job.error_message = error_message
+    job.finished_at = utc_now()
+    session.flush()
+
+    # Release the lock so retry can re-acquire
+    _release_stage_lock(session, job.asset_id, job.stage)
+
+    # Calculate retry delay (attempt 1 -> delay[0], attempt 2 -> delay[1], etc.)
+    delay_index = min(current_attempt - 1, len(RETRY_DELAYS_SECONDS) - 1)
+    delay_seconds = RETRY_DELAYS_SECONDS[delay_index]
+
+    logger.info(
+        "Scheduling retry: job_id=%s, next_attempt=%d, delay=%ds",
+        job_id, job.attempt, delay_seconds
+    )
+
+    # Re-enqueue orchestrator tick with delay (will re-dispatch the stage)
+    from app.huey_app import orchestrator_tick_task
+    orchestrator_tick_task.schedule((job.asset_id,), delay=delay_seconds)
+
+
+def _mark_dead_letter(
+    session: Session,
+    job: PipelineJob,
+    error_message: str,
+    error_code: str | None = None,
+) -> None:
+    """Mark a job as dead-letter.
+
+    Args:
+        session: Database session.
+        job: The PipelineJob to mark.
+        error_message: Summary error message.
+        error_code: Optional error code.
+    """
+    logger.warning(
+        "Dead-letter: job_id=%s, asset_id=%s, stage=%s, attempts=%d",
+        job.job_id, job.asset_id, job.stage, job.attempt
+    )
+    job.status = "dead_letter"
+    job.error_code = error_code or job.error_code or "DEAD_LETTER"
+    job.error_message = error_message
+    job.finished_at = utc_now()
+    session.flush()
+
+
+def _mark_job_completed(session: Session, job: PipelineJob) -> None:
+    """Mark a job as completed.
+
+    Args:
+        session: Database session.
+        job: The PipelineJob to mark.
+    """
+    job.status = "completed"
+    job.finished_at = utc_now()
+    job.error_code = None
+    job.error_message = None
+    session.flush()
+
+
+# --- Lock Management ---
+
+
+def _handle_stage_lock(
+    session: Session,
+    asset_id: str,
+    stage: str,
+    feature_spec_alias: str | None = None,
+) -> dict:
+    """Handle stage lock acquisition with stale reclamation.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+        stage: The pipeline stage.
+        feature_spec_alias: Optional feature spec alias (for feature stages).
+
+    Returns:
+        Dict with action and reason.
+    """
+    # Check for existing lock
+    existing_lock = _find_stage_lock(session, asset_id, stage, feature_spec_alias)
+
+    if existing_lock is not None:
+        now = utc_now()
+        # Ensure expires_at is timezone-aware for comparison (SQLite may return naive)
+        expires_at = existing_lock.expires_at
+        if expires_at.tzinfo is None:
+            from datetime import UTC
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at > now:
+            # Lock is still active - skip
+            logger.debug(
+                "Active lock exists for asset_id=%s, stage=%s",
+                asset_id, stage
+            )
+            return {"action": "skip", "reason": "lock_active"}
+        else:
+            # Lock is stale - reclaim it
+            logger.info(
+                "Reclaiming stale lock for asset_id=%s, stage=%s (expired at %s)",
+                asset_id, stage, existing_lock.expires_at
+            )
+            session.delete(existing_lock)
+            session.flush()
+
+    # Create new lock
+    worker_id = f"orchestrator-{uuid.uuid4().hex[:8]}"
+    create_stage_lock(
+        session=session,
+        asset_id=asset_id,
+        stage=stage,
+        worker_id=worker_id,
+        feature_spec_alias=feature_spec_alias,
+    )
+
+    return {"action": "acquired", "worker_id": worker_id}
+
+
+def _find_stage_lock(
+    session: Session,
+    asset_id: str,
+    stage: str,
+    feature_spec_alias: str | None = None,
+) -> StageLock | None:
+    """Find an existing stage lock.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+        stage: The pipeline stage.
+        feature_spec_alias: Optional feature spec alias.
+
+    Returns:
+        StageLock if found, None otherwise.
+    """
+    if feature_spec_alias is None:
+        stmt = select(StageLock).where(
+            and_(
+                StageLock.asset_id == asset_id,
+                StageLock.stage == stage,
+                StageLock.feature_spec_alias.is_(None),
+            )
+        )
+    else:
+        stmt = select(StageLock).where(
+            and_(
+                StageLock.asset_id == asset_id,
+                StageLock.stage == stage,
+                StageLock.feature_spec_alias == feature_spec_alias,
+            )
+        )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def _release_stage_lock(
+    session: Session,
+    asset_id: str,
+    stage: str,
+    feature_spec_alias: str | None = None,
+) -> None:
+    """Release a stage lock.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+        stage: The pipeline stage.
+        feature_spec_alias: Optional feature spec alias.
+    """
+    lock = _find_stage_lock(session, asset_id, stage, feature_spec_alias)
+    if lock is not None:
+        session.delete(lock)
+        session.flush()
+
+
+# --- Artifact Tracking ---
+
+
+def _artifact_exists(
+    session: Session,
+    asset_id: str,
+    stage: str,
+    feature_spec_alias: str | None = None,
+) -> bool:
+    """Check if artifact for a stage already exists.
+
+    Checks both artifact_index DB and filesystem.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+        stage: The pipeline stage.
+        feature_spec_alias: Optional feature spec alias (for feature stages).
+
+    Returns:
+        True if artifact exists, False otherwise.
+    """
+    if stage == STAGE_DECODE:
+        artifact_type = ARTIFACT_TYPE_NORMALIZED_WAV
+        artifact_path = audio_normalized_path(asset_id)
+
+        # Check filesystem first (authoritative)
+        if artifact_path.exists():
+            return True
+
+        # Check artifact_index
+        stmt = select(ArtifactIndex).where(
+            and_(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == artifact_type,
+            )
+        )
+        return session.execute(stmt).scalar_one_or_none() is not None
+
+    # Unknown stage - assume no artifact
+    return False
+
+
+def _record_artifact(
+    session: Session,
+    asset_id: str,
+    artifact_type: str,
+    artifact_path: str,
+    feature_spec_alias: str | None = None,
+    schema_version: str = "1.0.0",
+) -> None:
+    """Record an artifact in the artifact_index.
+
+    Idempotent: does nothing if artifact already recorded.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+        artifact_type: Type of artifact.
+        artifact_path: Path to the artifact.
+        feature_spec_alias: Optional feature spec alias.
+        schema_version: Schema version of the artifact.
+    """
+    # Check if already recorded
+    if feature_spec_alias is None:
+        stmt = select(ArtifactIndex).where(
+            and_(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == artifact_type,
+                ArtifactIndex.feature_spec_alias.is_(None),
+            )
+        )
+    else:
+        stmt = select(ArtifactIndex).where(
+            and_(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == artifact_type,
+                ArtifactIndex.feature_spec_alias == feature_spec_alias,
+            )
+        )
+
+    existing = session.execute(stmt).scalar_one_or_none()
+    if existing is not None:
+        return  # Already recorded
+
+    artifact = ArtifactIndex(
+        asset_id=asset_id,
+        artifact_type=artifact_type,
+        artifact_path=artifact_path,
+        feature_spec_alias=feature_spec_alias,
+        schema_version=schema_version,
+    )
+    session.add(artifact)
+    session.flush()
+
+
+# --- Job Management ---
+
+
+def _find_completed_ingest_job(session: Session, asset_id: str) -> PipelineJob | None:
+    """Find a completed ingest job for the asset.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+
+    Returns:
+        PipelineJob if found, None otherwise.
+    """
+    stmt = select(PipelineJob).where(
+        and_(
+            PipelineJob.asset_id == asset_id,
+            PipelineJob.stage == "ingest",
+            PipelineJob.status == "completed",
+        )
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def _find_dead_letter_job(session: Session, asset_id: str) -> PipelineJob | None:
+    """Find any dead-letter job for the asset.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+
+    Returns:
+        PipelineJob if found, None otherwise.
+    """
+    stmt = select(PipelineJob).where(
+        and_(
+            PipelineJob.asset_id == asset_id,
+            PipelineJob.status == "dead_letter",
+        )
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def _get_or_create_stage_job(
+    session: Session,
+    asset_id: str,
+    stage: str,
+    feature_spec_alias: str | None = None,
+) -> PipelineJob:
+    """Get or create a PipelineJob for a stage.
+
+    If a job exists and is in pending/failed state, returns it.
+    If no job exists, creates one with status=pending.
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+        stage: The pipeline stage.
+        feature_spec_alias: Optional feature spec alias.
+
+    Returns:
+        The PipelineJob (existing or new).
+    """
+    # Look for existing job that can be resumed
+    stmt = select(PipelineJob).where(
+        and_(
+            PipelineJob.asset_id == asset_id,
+            PipelineJob.stage == stage,
+            PipelineJob.status.in_(["pending", "failed", "running"]),
+        )
+    )
+    existing = session.execute(stmt).scalar_one_or_none()
+
+    if existing is not None:
+        return existing
+
+    # Create new job
+    job_id = uuid.uuid4().hex
+    job = PipelineJob(
+        job_id=job_id,
+        asset_id=asset_id,
+        stage=stage,
+        status="pending",
+        attempt=1,
+        feature_spec_alias=feature_spec_alias,
+    )
+    session.add(job)
+    session.flush()
+
+    logger.info("Created new job: job_id=%s, asset_id=%s, stage=%s", job_id, asset_id, stage)
+    return job
+
+
+def _determine_next_stage(session: Session, asset_id: str) -> str | None:
+    """Determine the next stage to process for an asset.
+
+    Stage progression: ingest -> decode (Step 3 only supports decode)
+
+    Args:
+        session: Database session.
+        asset_id: The asset ID.
+
+    Returns:
+        Stage name or None if all stages complete.
+    """
+    # Check if decode is needed
+    if not _artifact_exists(session, asset_id, STAGE_DECODE):
+        # Check for running/pending job that hasn't failed too many times
+        stmt = select(PipelineJob).where(
+            and_(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == STAGE_DECODE,
+            )
+        )
+        existing_job = session.execute(stmt).scalar_one_or_none()
+
+        if existing_job is None:
+            return STAGE_DECODE
+
+        # If job is completed but no artifact, something is wrong - still try decode
+        if existing_job.status == "completed":
+            # Artifact check already done above, shouldn't reach here normally
+            return None
+
+        if existing_job.status == "dead_letter":
+            return None  # Don't retry dead-letter
+
+        # pending/failed/running - orchestrator will handle
+        return STAGE_DECODE
+
+    # All stages complete (Step 3: only decode)
+    return None
+
+
+# --- Cleanup Utilities ---
+
+
+def cleanup_stale_locks(session: Session, max_age_seconds: int | None = None) -> int:
+    """Clean up stale locks.
+
+    Args:
+        session: Database session.
+        max_age_seconds: Optional override for TTL. Defaults to STAGE_LOCK_TTL_SECONDS.
+
+    Returns:
+        Number of locks cleaned up.
+    """
+    # Note: max_age_seconds param reserved for future use; currently we use expires_at directly
+    _ = max_age_seconds  # Silence unused warning; param kept for API compatibility
+
+    stmt = select(StageLock).where(StageLock.expires_at < utc_now())
+    stale_locks = session.execute(stmt).scalars().all()
+
+    count = 0
+    for lock in stale_locks:
+        logger.info(
+            "Cleaning up stale lock: asset_id=%s, stage=%s, expired_at=%s",
+            lock.asset_id, lock.stage, lock.expires_at
+        )
+        session.delete(lock)
+        count += 1
+
+    session.flush()
+    return count

@@ -9,6 +9,7 @@ dependencies = [
     "python-multipart>=0.0.6,<1",
     "pydantic>=2.5,<3",
     "uvicorn>=0.24,<1",
+    "huey>=2.5,<3",
 ]
 
 [project.optional-dependencies]
