@@ -37,7 +37,9 @@ CANONICAL_CHANNELS = 1
 DEFAULT_FEATURE_SPEC_ID = "mel64_h10ms_w25ms_sr22050__yamnet1024_h0.5s_onnx"
 
 # Retry policy (Blueprint section 9 - LOCKED)
-# Maximum attempts before dead-letter
-MAX_RETRY_ATTEMPTS = 3
 # Retry delays in seconds: 60s, 300s (5min), 900s (15min)
 RETRY_DELAYS_SECONDS = (60, 300, 900)
+# Total attempts = initial attempt + 3 retries = 4
+# After all retries exhausted, job is dead-lettered
+MAX_ATTEMPTS_TOTAL = 1 + len(RETRY_DELAYS_SECONDS)
+assert MAX_ATTEMPTS_TOTAL == 4, "Blueprint requires exactly 4 total attempts"

@@ -94,12 +94,16 @@ class TestStartupCleanupHook:
         asset_dir = temp_audio_dir / "asset-001"
         (asset_dir / "orphan.wav.tmp").write_bytes(b"orphan")
 
-        # Patch AUDIO_DIR at the config module level
+        # Patch AUDIO_DIR at the config module level (source of truth)
         with patch("app.config.AUDIO_DIR", temp_audio_dir):
-            # Re-import to pick up the patch
+            # Reload the main module so its module-level imports pick up the patched config.
+            # This is necessary because the cleanup function imports AUDIO_DIR at call time.
+            # Note: This pattern can be fragile under pytest-xdist parallel execution;
+            # may need serial marker (pytest.mark.serial) if issues arise.
             import importlib
 
             import services.ingest_api.main as main_module
+
             importlib.reload(main_module)
 
             main_module._cleanup_orphan_temp_files_safe()
@@ -115,10 +119,12 @@ class TestStartupCleanupHook:
         mock_dir = MagicMock()
         mock_dir.exists.side_effect = PermissionError("Access denied")
 
+        # Patch at config source; reload main module to pick up patched value
         with patch("app.config.AUDIO_DIR", mock_dir):
             import importlib
 
             import services.ingest_api.main as main_module
+
             importlib.reload(main_module)
 
             # Should not raise
@@ -134,18 +140,22 @@ class TestStartupCleanupHook:
         (asset_dir / "orphan1.tmp").write_bytes(b"orphan")
         (temp_audio_dir / "orphan2.tmp").write_bytes(b"orphan")
 
+        # Patch at config source; reload main module to pick up patched value
         with patch("app.config.AUDIO_DIR", temp_audio_dir):
             import importlib
 
             import services.ingest_api.main as main_module
+
             importlib.reload(main_module)
 
             with caplog.at_level(logging.INFO):
                 main_module._cleanup_orphan_temp_files_safe()
 
         # Verify log message
-        assert any("removed" in record.message and "orphan temp files" in record.message
-                   for record in caplog.records)
+        assert any(
+            "removed" in record.message and "orphan temp files" in record.message
+            for record in caplog.records
+        )
 
 
 class TestStartupCleanupIntegration:
@@ -168,13 +178,13 @@ class TestStartupCleanupIntegration:
         with tempfile.TemporaryDirectory() as db_tmpdir:
             db_path = Path(db_tmpdir) / "test.db"
 
-            # Patch at the config module level
+            # Patch at config source; reload main module to pick up patched values
             with patch("app.config.AUDIO_DIR", temp_audio_dir):
                 with patch("app.config.DB_PATH", db_path):
-                    # Re-import modules to pick up patches
                     import importlib
 
                     import services.ingest_api.main as main_module
+
                     importlib.reload(main_module)
 
                     # TestClient invokes lifespan

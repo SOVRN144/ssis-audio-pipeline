@@ -81,8 +81,7 @@ def stage_worker_task(job_id: str, asset_id: str, stage: str) -> dict:
     from app.orchestrator import execute_stage
 
     logger.info(
-        "Stage worker task started: job_id=%s, asset_id=%s, stage=%s",
-        job_id, asset_id, stage
+        "Stage worker task started: job_id=%s, asset_id=%s, stage=%s", job_id, asset_id, stage
     )
     result = execute_stage(job_id, asset_id, stage)
     logger.info("Stage worker task completed: job_id=%s, result=%s", job_id, result)
@@ -113,7 +112,10 @@ def enqueue_stage_worker(job_id: str, asset_id: str, stage: str, delay_seconds: 
     """
     logger.info(
         "Enqueueing stage worker: job_id=%s, asset_id=%s, stage=%s, delay=%ds",
-        job_id, asset_id, stage, delay_seconds
+        job_id,
+        asset_id,
+        stage,
+        delay_seconds,
     )
     if delay_seconds > 0:
         stage_worker_task.schedule((job_id, asset_id, stage), delay=delay_seconds)

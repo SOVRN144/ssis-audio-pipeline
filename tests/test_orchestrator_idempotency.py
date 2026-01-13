@@ -85,9 +85,13 @@ class TestOrchestratorIdempotency:
             assert result2["reason"] == "lock_active"
 
             # Verify only one lock exists
-            stmt = select(func.count()).select_from(StageLock).where(
-                StageLock.asset_id == asset_id,
-                StageLock.stage == STAGE_DECODE,
+            stmt = (
+                select(func.count())
+                .select_from(StageLock)
+                .where(
+                    StageLock.asset_id == asset_id,
+                    StageLock.stage == STAGE_DECODE,
+                )
             )
             count = session.execute(stmt).scalar()
             assert count == 1
@@ -108,9 +112,13 @@ class TestOrchestratorIdempotency:
                 session.commit()
 
             # Verify only one decode job exists
-            stmt = select(func.count()).select_from(PipelineJob).where(
-                PipelineJob.asset_id == asset_id,
-                PipelineJob.stage == STAGE_DECODE,
+            stmt = (
+                select(func.count())
+                .select_from(PipelineJob)
+                .where(
+                    PipelineJob.asset_id == asset_id,
+                    PipelineJob.stage == STAGE_DECODE,
+                )
             )
             count = session.execute(stmt).scalar()
             assert count == 1
@@ -144,16 +152,24 @@ class TestOrchestratorIdempotency:
             assert result["reason"] == "all_stages_complete"
 
             # Verify no lock or job created for decode
-            lock_stmt = select(func.count()).select_from(StageLock).where(
-                StageLock.asset_id == asset_id,
-                StageLock.stage == STAGE_DECODE,
+            lock_stmt = (
+                select(func.count())
+                .select_from(StageLock)
+                .where(
+                    StageLock.asset_id == asset_id,
+                    StageLock.stage == STAGE_DECODE,
+                )
             )
             lock_count = session.execute(lock_stmt).scalar()
             assert lock_count == 0
 
-            job_stmt = select(func.count()).select_from(PipelineJob).where(
-                PipelineJob.asset_id == asset_id,
-                PipelineJob.stage == STAGE_DECODE,
+            job_stmt = (
+                select(func.count())
+                .select_from(PipelineJob)
+                .where(
+                    PipelineJob.asset_id == asset_id,
+                    PipelineJob.stage == STAGE_DECODE,
+                )
             )
             job_count = session.execute(job_stmt).scalar()
             assert job_count == 0
@@ -169,30 +185,27 @@ class TestOrchestratorIdempotency:
         asset_id, SessionFactory = asset_with_ingest
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Patch the audio path to use temp directory
-            from app.utils import paths
-            original_audio_dir = paths.AUDIO_DIR
+            tmpdir_path = Path(tmpdir)
 
-            try:
-                paths.AUDIO_DIR = Path(tmpdir)
+            # Create the normalized.wav file
+            asset_dir = tmpdir_path / asset_id
+            asset_dir.mkdir(parents=True)
+            normalized_path = asset_dir / "normalized.wav"
+            normalized_path.write_bytes(b"fake wav data")
 
-                # Create the normalized.wav file
-                asset_dir = Path(tmpdir) / asset_id
-                asset_dir.mkdir(parents=True)
-                normalized_path = asset_dir / "normalized.wav"
-                normalized_path.write_bytes(b"fake wav data")
+            # Patch at config source so paths module picks it up
+            with patch("app.config.AUDIO_DIR", tmpdir_path):
+                # Also patch the paths module directly since it imports at module load
+                with patch("app.utils.paths.AUDIO_DIR", tmpdir_path):
+                    session = SessionFactory()
+                    try:
+                        result = _orchestrator_tick_impl(session, asset_id)
 
-                session = SessionFactory()
-                try:
-                    result = _orchestrator_tick_impl(session, asset_id)
-
-                    # Artifact exists means decode stage is complete => all stages complete
-                    assert result["status"] == "no_work"
-                    assert result["reason"] == "all_stages_complete"
-                finally:
-                    session.close()
-            finally:
-                paths.AUDIO_DIR = original_audio_dir
+                        # Artifact exists means decode stage is complete => all stages complete
+                        assert result["status"] == "no_work"
+                        assert result["reason"] == "all_stages_complete"
+                    finally:
+                        session.close()
 
     def test_idempotent_artifact_recording(self, test_db):
         """Recording same artifact twice should not create duplicates."""
@@ -214,21 +227,23 @@ class TestOrchestratorIdempotency:
 
             # Record artifact twice
             _record_artifact(
-                session, asset_id, ARTIFACT_TYPE_NORMALIZED_WAV,
-                "/path/to/normalized.wav"
+                session, asset_id, ARTIFACT_TYPE_NORMALIZED_WAV, "/path/to/normalized.wav"
             )
             session.flush()
 
             _record_artifact(
-                session, asset_id, ARTIFACT_TYPE_NORMALIZED_WAV,
-                "/path/to/normalized.wav"
+                session, asset_id, ARTIFACT_TYPE_NORMALIZED_WAV, "/path/to/normalized.wav"
             )
             session.flush()
 
             # Verify only one record exists
-            stmt = select(func.count()).select_from(ArtifactIndex).where(
-                ArtifactIndex.asset_id == asset_id,
-                ArtifactIndex.artifact_type == ARTIFACT_TYPE_NORMALIZED_WAV,
+            stmt = (
+                select(func.count())
+                .select_from(ArtifactIndex)
+                .where(
+                    ArtifactIndex.asset_id == asset_id,
+                    ArtifactIndex.artifact_type == ARTIFACT_TYPE_NORMALIZED_WAV,
+                )
             )
             count = session.execute(stmt).scalar()
             assert count == 1
@@ -278,6 +293,7 @@ class TestStaleLockReclamation:
             assert new_lock.worker_id != "old-worker"
             # Check new lock is not expired (handle potential timezone-naive datetime)
             from datetime import UTC
+
             expires_at = new_lock.expires_at
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=UTC)

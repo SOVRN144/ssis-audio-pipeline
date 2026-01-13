@@ -8,8 +8,8 @@ Stage progression: ingest -> decode -> features -> segments -> preview
 Step 3 scope:
 - Planning based on artifact existence + artifact_index
 - StageLock acquisition with TTL and stale reclamation
-- Retry policy: 3 attempts, delays 60s/300s/900s
-- Dead-letter after repeated failures
+- Retry policy: 4 total attempts (initial + 3 retries), delays 60s/300s/900s
+- Dead-letter after all retries exhausted
 
 Step 3 does NOT implement actual worker processing (decode/normalize/features).
 """
@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import and_, select
 
 from app.config import (
-    MAX_RETRY_ATTEMPTS,
+    MAX_ATTEMPTS_TOTAL,
     RETRY_DELAYS_SECONDS,
 )
 from app.db import create_stage_lock, init_db
@@ -96,8 +96,7 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
     dead_letter_job = _find_dead_letter_job(session, asset_id)
     if dead_letter_job is not None:
         logger.info(
-            "Asset %s has dead-letter job (stage=%s), skipping",
-            asset_id, dead_letter_job.stage
+            "Asset %s has dead-letter job (stage=%s), skipping", asset_id, dead_letter_job.stage
         )
         return {
             "status": "skipped",
@@ -136,7 +135,7 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
     job = _get_or_create_stage_job(session, asset_id, next_stage)
 
     # 7. Check if this is a retry scenario
-    if job.status == "failed" and job.attempt >= MAX_RETRY_ATTEMPTS:
+    if job.status == "failed" and job.attempt >= MAX_ATTEMPTS_TOTAL:
         # Should have been caught as dead_letter, but handle defensively
         _mark_dead_letter(session, job, "Max attempts exceeded")
         return {
@@ -153,6 +152,7 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
 
     # 9. Dispatch the stage worker task
     from app.huey_app import enqueue_stage_worker
+
     enqueue_stage_worker(job.job_id, asset_id, next_stage)
 
     return {
@@ -274,9 +274,15 @@ def _handle_stage_failure(
     """Handle a stage failure with retry logic.
 
     Per Blueprint section 9:
-    - 3 attempts max
-    - Delays: 60s, 300s, 900s
-    - After 3 failures: dead-letter
+    - 3 retries with delays 60s, 300s, 900s
+    - 4 total attempts (initial + 3 retries)
+    - After 4th attempt fails: dead-letter
+
+    Attempt mapping:
+    - attempt 1 fails -> schedule attempt 2 after 60s
+    - attempt 2 fails -> schedule attempt 3 after 300s
+    - attempt 3 fails -> schedule attempt 4 after 900s
+    - attempt 4 fails -> dead-letter
 
     Args:
         session: Database session.
@@ -294,37 +300,44 @@ def _handle_stage_failure(
     current_attempt = job.attempt
     logger.info(
         "Stage failure: job_id=%s, stage=%s, attempt=%d/%d, error=%s",
-        job_id, job.stage, current_attempt, MAX_RETRY_ATTEMPTS, error_code
+        job_id,
+        job.stage,
+        current_attempt,
+        MAX_ATTEMPTS_TOTAL,
+        error_code,
     )
 
-    if current_attempt >= MAX_RETRY_ATTEMPTS:
-        # Dead-letter
+    if current_attempt >= MAX_ATTEMPTS_TOTAL:
+        # Dead-letter: all retries exhausted
         _mark_dead_letter(session, job, error_message, error_code)
-        _release_stage_lock(session, job.asset_id, job.stage)
+        _release_stage_lock(session, job.asset_id, job.stage, job.feature_spec_alias)
         return
 
-    # Increment attempt and schedule retry
-    job.attempt = current_attempt + 1
-    job.status = "failed"
+    # Schedule retry with incremented attempt
+    next_attempt = current_attempt + 1
+    # Delay index: attempt 1 -> delay[0]=60s, attempt 2 -> delay[1]=300s, attempt 3 -> delay[2]=900s
+    delay_seconds = RETRY_DELAYS_SECONDS[current_attempt - 1]
+
+    job.attempt = next_attempt
+    job.status = "queued"
     job.error_code = error_code
     job.error_message = error_message
     job.finished_at = utc_now()
     session.flush()
 
     # Release the lock so retry can re-acquire
-    _release_stage_lock(session, job.asset_id, job.stage)
-
-    # Calculate retry delay (attempt 1 -> delay[0], attempt 2 -> delay[1], etc.)
-    delay_index = min(current_attempt - 1, len(RETRY_DELAYS_SECONDS) - 1)
-    delay_seconds = RETRY_DELAYS_SECONDS[delay_index]
+    _release_stage_lock(session, job.asset_id, job.stage, job.feature_spec_alias)
 
     logger.info(
         "Scheduling retry: job_id=%s, next_attempt=%d, delay=%ds",
-        job_id, job.attempt, delay_seconds
+        job_id,
+        next_attempt,
+        delay_seconds,
     )
 
     # Re-enqueue orchestrator tick with delay (will re-dispatch the stage)
     from app.huey_app import orchestrator_tick_task
+
     orchestrator_tick_task.schedule((job.asset_id,), delay=delay_seconds)
 
 
@@ -344,7 +357,10 @@ def _mark_dead_letter(
     """
     logger.warning(
         "Dead-letter: job_id=%s, asset_id=%s, stage=%s, attempts=%d",
-        job.job_id, job.asset_id, job.stage, job.attempt
+        job.job_id,
+        job.asset_id,
+        job.stage,
+        job.attempt,
     )
     job.status = "dead_letter"
     job.error_code = error_code or job.error_code or "DEAD_LETTER"
@@ -396,19 +412,19 @@ def _handle_stage_lock(
         expires_at = existing_lock.expires_at
         if expires_at.tzinfo is None:
             from datetime import UTC
+
             expires_at = expires_at.replace(tzinfo=UTC)
         if expires_at > now:
             # Lock is still active - skip
-            logger.debug(
-                "Active lock exists for asset_id=%s, stage=%s",
-                asset_id, stage
-            )
+            logger.debug("Active lock exists for asset_id=%s, stage=%s", asset_id, stage)
             return {"action": "skip", "reason": "lock_active"}
         else:
             # Lock is stale - reclaim it
             logger.info(
                 "Reclaiming stale lock for asset_id=%s, stage=%s (expired at %s)",
-                asset_id, stage, existing_lock.expires_at
+                asset_id,
+                stage,
+                existing_lock.expires_at,
             )
             session.delete(existing_lock)
             session.flush()
@@ -628,7 +644,7 @@ def _get_or_create_stage_job(
 ) -> PipelineJob:
     """Get or create a PipelineJob for a stage.
 
-    If a job exists and is in pending/failed state, returns it.
+    If a job exists and is in pending/queued/failed/running state, returns it.
     If no job exists, creates one with status=pending.
 
     Args:
@@ -645,7 +661,7 @@ def _get_or_create_stage_job(
         and_(
             PipelineJob.asset_id == asset_id,
             PipelineJob.stage == stage,
-            PipelineJob.status.in_(["pending", "failed", "running"]),
+            PipelineJob.status.in_(["pending", "queued", "failed", "running"]),
         )
     )
     existing = session.execute(stmt).scalar_one_or_none()
@@ -734,7 +750,9 @@ def cleanup_stale_locks(session: Session, max_age_seconds: int | None = None) ->
     for lock in stale_locks:
         logger.info(
             "Cleaning up stale lock: asset_id=%s, stage=%s, expired_at=%s",
-            lock.asset_id, lock.stage, lock.expires_at
+            lock.asset_id,
+            lock.stage,
+            lock.expires_at,
         )
         session.delete(lock)
         count += 1

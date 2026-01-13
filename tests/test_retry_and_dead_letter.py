@@ -1,9 +1,9 @@
 """Tests for retry policy and dead-letter logic.
 
 Step 3: Tests Blueprint section 9 retry semantics:
-- 3 attempts max
+- 4 total attempts (initial + 3 retries)
 - Delays: 60s, 300s, 900s
-- Dead-letter after 3 failures
+- Dead-letter after 4th failure
 """
 
 import tempfile
@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
-from app.config import MAX_RETRY_ATTEMPTS, RETRY_DELAYS_SECONDS
+from app.config import MAX_ATTEMPTS_TOTAL, RETRY_DELAYS_SECONDS
 from app.db import init_db
 from app.models import AudioAsset, PipelineJob, StageLock
 from app.orchestrator import (
@@ -77,9 +77,14 @@ class TestRetryPolicy:
     """Tests for retry policy configuration."""
 
     def test_retry_policy_constants(self):
-        """Verify retry policy constants match Blueprint section 9."""
-        assert MAX_RETRY_ATTEMPTS == 3
+        """Verify retry policy constants match Blueprint section 9.
+
+        Blueprint specifies 3 retries with delays 60s, 300s, 900s.
+        This means 4 total attempts: initial + 3 retries.
+        """
+        assert MAX_ATTEMPTS_TOTAL == 4
         assert RETRY_DELAYS_SECONDS == (60, 300, 900)
+        assert len(RETRY_DELAYS_SECONDS) == MAX_ATTEMPTS_TOTAL - 1
 
     def test_attempt_starts_at_one(self, test_db):
         """Job attempt should start at 1 (not 0)."""
@@ -113,8 +118,8 @@ class TestRetryPolicy:
 class TestRetryBehavior:
     """Tests for retry behavior on failure."""
 
-    def test_first_failure_increments_attempt(self, asset_with_decode_job):
-        """First failure should increment attempt to 2."""
+    def test_first_failure_schedules_60s_retry(self, asset_with_decode_job):
+        """First failure (attempt 1) should schedule retry after 60s."""
         asset_id, job_id, SessionFactory = asset_with_decode_job
 
         session = SessionFactory()
@@ -127,7 +132,7 @@ class TestRetryBehavior:
             stmt = select(PipelineJob).where(PipelineJob.job_id == job_id)
             job = session.execute(stmt).scalar_one()
             assert job.attempt == 2
-            assert job.status == "failed"
+            assert job.status == "queued"
             assert job.error_code == "TEST_ERROR"
 
             # Verify retry was scheduled with correct delay (60s for first retry)
@@ -137,8 +142,8 @@ class TestRetryBehavior:
         finally:
             session.close()
 
-    def test_second_failure_uses_second_delay(self, test_db):
-        """Second failure should use 300s delay."""
+    def test_second_failure_schedules_300s_retry(self, test_db):
+        """Second failure (attempt 2) should schedule retry after 300s."""
         session = test_db()
         try:
             asset_id = "test-second-fail"
@@ -156,7 +161,7 @@ class TestRetryBehavior:
                 asset_id=asset_id,
                 stage=STAGE_DECODE,
                 status="running",
-                attempt=2,  # Already on second attempt
+                attempt=2,  # On second attempt
             )
             session.add(job)
             session.commit()
@@ -169,6 +174,7 @@ class TestRetryBehavior:
             stmt = select(PipelineJob).where(PipelineJob.job_id == "second-fail-job")
             job = session.execute(stmt).scalar_one()
             assert job.attempt == 3
+            assert job.status == "queued"
 
             # Verify delay is 300s (second delay value)
             mock_tick.schedule.assert_called_once()
@@ -177,8 +183,8 @@ class TestRetryBehavior:
         finally:
             session.close()
 
-    def test_third_failure_dead_letters(self, test_db):
-        """Third failure should dead-letter (no more retries)."""
+    def test_third_failure_schedules_900s_retry(self, test_db):
+        """Third failure (attempt 3) should schedule retry after 900s."""
         session = test_db()
         try:
             asset_id = "test-third-fail"
@@ -205,12 +211,53 @@ class TestRetryBehavior:
                 _handle_stage_failure(session, "third-fail-job", "TEST_ERROR", "Test failure")
                 session.commit()
 
-            # Verify job is dead-lettered
+            # Verify attempt incremented to 4
             stmt = select(PipelineJob).where(PipelineJob.job_id == "third-fail-job")
+            job = session.execute(stmt).scalar_one()
+            assert job.attempt == 4
+            assert job.status == "queued"
+
+            # Verify delay is 900s (third delay value)
+            mock_tick.schedule.assert_called_once()
+            call_kwargs = mock_tick.schedule.call_args
+            assert call_kwargs[1]["delay"] == RETRY_DELAYS_SECONDS[2]  # 900s
+        finally:
+            session.close()
+
+    def test_fourth_failure_dead_letters(self, test_db):
+        """Fourth failure (attempt 4) should dead-letter (no more retries)."""
+        session = test_db()
+        try:
+            asset_id = "test-fourth-fail"
+
+            asset = AudioAsset(
+                asset_id=asset_id,
+                content_hash="fourthfail123",
+                source_uri="/test/path",
+                original_filename="test.wav",
+            )
+            session.add(asset)
+
+            job = PipelineJob(
+                job_id="fourth-fail-job",
+                asset_id=asset_id,
+                stage=STAGE_DECODE,
+                status="running",
+                attempt=4,  # On fourth (final) attempt
+            )
+            session.add(job)
+            session.commit()
+
+            with patch("app.huey_app.orchestrator_tick_task") as mock_tick:
+                _handle_stage_failure(session, "fourth-fail-job", "TEST_ERROR", "Test failure")
+                session.commit()
+
+            # Verify job is dead-lettered
+            stmt = select(PipelineJob).where(PipelineJob.job_id == "fourth-fail-job")
             job = session.execute(stmt).scalar_one()
             assert job.status == "dead_letter"
             assert job.error_code == "TEST_ERROR"
-            assert job.attempt == 3  # Should NOT increment past 3
+            assert job.attempt == 4  # Should NOT increment past 4
 
             # Verify no retry was scheduled
             mock_tick.schedule.assert_not_called()
@@ -249,9 +296,9 @@ class TestDeadLetterBehavior:
                 asset_id=asset_id,
                 stage=STAGE_DECODE,
                 status="dead_letter",
-                attempt=3,
+                attempt=4,
                 error_code="WORKER_ERROR",
-                error_message="Failed after 3 attempts",
+                error_message="Failed after 4 attempts",
             )
             session.add(dead_job)
             session.commit()
@@ -292,7 +339,7 @@ class TestDeadLetterBehavior:
                 asset_id=asset_id,
                 stage=STAGE_DECODE,
                 status="dead_letter",
-                attempt=3,
+                attempt=4,
             )
             session.add(dead_job)
             session.commit()
@@ -325,7 +372,7 @@ class TestDeadLetterBehavior:
                 asset_id=asset_id,
                 stage=STAGE_DECODE,
                 status="running",
-                attempt=3,
+                attempt=4,
             )
             session.add(job)
             session.commit()
@@ -416,7 +463,7 @@ class TestLockReleaseOnFailure:
                 asset_id=asset_id,
                 stage=STAGE_DECODE,
                 status="running",
-                attempt=3,  # Will dead-letter
+                attempt=4,  # Will dead-letter (4th attempt is final)
             )
             session.add(job)
 

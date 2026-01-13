@@ -4,12 +4,12 @@ Core ingest business logic implementing:
 - Idempotency via (owner_entity_id, content_hash)
 - Atomic file persistence
 - AudioAsset + PipelineJob DB record creation
-
-NO orchestrator logic, NO workers, NO Huey. Step 2 scope only.
+- Best-effort orchestrator enqueue on successful ingest (Huey)
 """
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -29,6 +29,8 @@ from app.utils.paths import audio_original_path
 
 if TYPE_CHECKING:
     from typing import BinaryIO
+
+logger = logging.getLogger(__name__)
 
 
 # --- Error Codes (Blueprint section 8) ---
@@ -466,10 +468,6 @@ def _enqueue_orchestrator_tick_safe(asset_id: str) -> None:
     Args:
         asset_id: The asset ID to enqueue for processing.
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     try:
         from app.huey_app import enqueue_orchestrator_tick
 
