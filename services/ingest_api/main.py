@@ -1,9 +1,11 @@
 """SSIS Audio Pipeline - Ingest API FastAPI application.
 
 FastAPI service for audio file ingestion.
-Step 2: local + upload ingest endpoints with persistence and idempotency.
+Step 2 business logic: local + upload ingest endpoints with persistence and idempotency.
 
-NO orchestrator logic, NO workers, NO Huey dispatch. DB records only.
+On successful ingest, a best-effort non-blocking enqueue of the orchestrator tick
+is triggered (Step 3). The orchestrator handles stage planning and dispatch; this
+module does NOT contain orchestrator logic or DSP processing.
 
 Run with:
     uvicorn services.ingest_api.main:app --reload  # dev server only

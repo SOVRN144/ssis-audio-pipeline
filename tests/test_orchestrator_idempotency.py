@@ -337,3 +337,103 @@ class TestStaleLockReclamation:
             assert lock.worker_id == "active-worker"
         finally:
             session.close()
+
+    def test_reclaim_stale_lock_with_naive_datetime(self, asset_with_ingest):
+        """Should safely reclaim stale locks when DB returns naive datetime.
+
+        SQLite commonly returns naive datetime values (no tzinfo).
+        The orchestrator must handle this defensively and still reclaim expired locks.
+        """
+        asset_id, SessionFactory = asset_with_ingest
+
+        from datetime import datetime, timedelta
+
+        session = SessionFactory()
+        try:
+            # Create a stale lock with NAIVE datetime (no tzinfo) - simulates SQLite behavior
+            # We need to bypass SQLAlchemy's default handling, so use raw datetime
+            past_naive = datetime.utcnow() - timedelta(hours=1)
+            expired_naive = datetime.utcnow() - timedelta(minutes=30)
+
+            stale_lock = StageLock(
+                asset_id=asset_id,
+                stage=STAGE_DECODE,
+                worker_id="naive-worker",
+                acquired_at=past_naive,  # Naive datetime
+                expires_at=expired_naive,  # Naive datetime - expired
+            )
+            session.add(stale_lock)
+            session.commit()
+
+            # Verify the lock was stored - we're testing that orchestrator
+            # handles naive datetimes correctly (SQLite behavior)
+            stmt = select(StageLock).where(StageLock.asset_id == asset_id)
+            _ = session.execute(stmt).scalar_one()  # Confirm lock exists
+
+            with patch("app.huey_app.enqueue_stage_worker"):
+                # This should NOT crash even with naive datetime
+                result = _orchestrator_tick_impl(session, asset_id)
+                session.commit()
+
+            # Should have reclaimed the stale lock and dispatched
+            assert result["status"] == "dispatched"
+
+            # Lock should have been reclaimed (worker_id changed)
+            stmt = select(StageLock).where(
+                StageLock.asset_id == asset_id,
+                StageLock.stage == STAGE_DECODE,
+            )
+            new_lock = session.execute(stmt).scalar_one()
+            assert new_lock.worker_id != "naive-worker"
+        finally:
+            session.close()
+
+    def test_lock_reclaim_records_metrics(self, asset_with_ingest):
+        """Stale lock reclaim should record metrics in PipelineJob.metrics_json."""
+        import json
+
+        asset_id, SessionFactory = asset_with_ingest
+
+        from datetime import timedelta
+
+        from app.models import utc_now
+
+        session = SessionFactory()
+        try:
+            # Create a stale lock
+            stale_lock = StageLock(
+                asset_id=asset_id,
+                stage=STAGE_DECODE,
+                worker_id="metrics-test-worker",
+                acquired_at=utc_now() - timedelta(hours=1),
+                expires_at=utc_now() - timedelta(minutes=30),
+            )
+            session.add(stale_lock)
+            session.commit()
+
+            with patch("app.huey_app.enqueue_stage_worker"):
+                result = _orchestrator_tick_impl(session, asset_id)
+                session.commit()
+
+            assert result["status"] == "dispatched"
+
+            # Fetch the job and check metrics_json
+            stmt = select(PipelineJob).where(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == STAGE_DECODE,
+            )
+            job = session.execute(stmt).scalar_one()
+
+            # Verify metrics_json contains lock_reclaim data
+            assert job.metrics_json is not None
+            metrics = json.loads(job.metrics_json)
+            assert "lock_reclaim" in metrics
+            assert metrics["lock_reclaim"]["count"] == 1
+            assert len(metrics["lock_reclaim"]["events"]) == 1
+
+            event = metrics["lock_reclaim"]["events"][0]
+            assert event["reclaimed_worker_id"] == "metrics-test-worker"
+            assert "expired_at" in event
+            assert "reclaimed_at" in event
+        finally:
+            session.close()

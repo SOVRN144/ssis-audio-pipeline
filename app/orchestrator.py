@@ -12,10 +12,25 @@ Step 3 scope:
 - Dead-letter after all retries exhausted
 
 Step 3 does NOT implement actual worker processing (decode/normalize/features).
+
+Retry Semantics (Blueprint section 9):
+---------------------------------------
+Blueprint specifies three retry delays: 60s, 300s, 900s.
+This means:
+  - Attempt 1: Initial attempt (no delay)
+  - Attempt 2: First retry after 60s delay
+  - Attempt 3: Second retry after 300s delay
+  - Attempt 4: Third retry after 900s delay
+  - After attempt 4 fails: job is dead-lettered
+
+Thus "3 retries" = 4 total attempts. MAX_ATTEMPTS_TOTAL is set to 4.
+The delay index is (current_attempt - 1), so attempt 1 failure triggers
+RETRY_DELAYS_SECONDS[0]=60s, etc.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import TYPE_CHECKING
@@ -43,6 +58,70 @@ STAGE_DECODE = "decode"
 
 # Artifact type for decode stage output
 ARTIFACT_TYPE_NORMALIZED_WAV = "normalized_wav"
+
+# Maximum lock reclaim events to store in metrics_json (prevent unbounded growth)
+MAX_LOCK_RECLAIM_EVENTS = 10
+
+
+# --- Metrics Helpers ---
+
+
+def _record_lock_reclaim_metric(
+    job: PipelineJob,
+    reclaimed_worker_id: str,
+    expired_at_str: str,
+) -> None:
+    """Record a lock reclaim event in the job's metrics_json.
+
+    Keeps a counter and a bounded list of recent reclaim events.
+    Safe if metrics_json is null or missing expected structure.
+
+    Args:
+        job: The PipelineJob to update.
+        reclaimed_worker_id: Worker ID of the reclaimed lock.
+        expired_at_str: ISO timestamp when the lock expired.
+    """
+    # Parse existing metrics or start fresh
+    try:
+        metrics = json.loads(job.metrics_json) if job.metrics_json else {}
+    except (json.JSONDecodeError, TypeError):
+        metrics = {}
+
+    # Ensure metrics is a dict
+    if not isinstance(metrics, dict):
+        metrics = {}
+
+    # Initialize lock_reclaim section if needed
+    if "lock_reclaim" not in metrics:
+        metrics["lock_reclaim"] = {"count": 0, "events": []}
+
+    lock_reclaim = metrics["lock_reclaim"]
+
+    # Increment counter
+    lock_reclaim["count"] = lock_reclaim.get("count", 0) + 1
+
+    # Add event (bounded list)
+    events = lock_reclaim.get("events", [])
+    if not isinstance(events, list):
+        events = []
+
+    events.append(
+        {
+            "reclaimed_worker_id": reclaimed_worker_id,
+            "expired_at": expired_at_str,
+            "reclaimed_at": utc_now().isoformat(),
+        }
+    )
+
+    # Keep only the last N events
+    if len(events) > MAX_LOCK_RECLAIM_EVENTS:
+        events = events[-MAX_LOCK_RECLAIM_EVENTS:]
+
+    lock_reclaim["events"] = events
+    metrics["lock_reclaim"] = lock_reclaim
+
+    # Write back
+    job.metrics_json = json.dumps(metrics)
 
 
 # --- Orchestrator Tick ---
@@ -133,6 +212,16 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
 
     # 6. Create or update the PipelineJob for this stage
     job = _get_or_create_stage_job(session, asset_id, next_stage)
+
+    # 6a. Record lock reclaim metric if applicable
+    if "reclaim_info" in lock_result:
+        reclaim_info = lock_result["reclaim_info"]
+        _record_lock_reclaim_metric(
+            job,
+            reclaim_info["reclaimed_worker_id"],
+            reclaim_info["expired_at"],
+        )
+        session.flush()
 
     # 7. Check if this is a retry scenario
     if job.status == "failed" and job.attempt >= MAX_ATTEMPTS_TOTAL:
@@ -406,6 +495,8 @@ def _handle_stage_lock(
     # Check for existing lock
     existing_lock = _find_stage_lock(session, asset_id, stage, feature_spec_alias)
 
+    reclaim_info = None  # Track if we reclaimed a stale lock
+
     if existing_lock is not None:
         now = utc_now()
         # Ensure expires_at is timezone-aware for comparison (SQLite may return naive)
@@ -426,6 +517,11 @@ def _handle_stage_lock(
                 stage,
                 existing_lock.expires_at,
             )
+            # Capture reclaim info for metrics before deleting
+            reclaim_info = {
+                "reclaimed_worker_id": existing_lock.worker_id,
+                "expired_at": existing_lock.expires_at.isoformat(),
+            }
             session.delete(existing_lock)
             session.flush()
 
@@ -439,7 +535,10 @@ def _handle_stage_lock(
         feature_spec_alias=feature_spec_alias,
     )
 
-    return {"action": "acquired", "worker_id": worker_id}
+    result = {"action": "acquired", "worker_id": worker_id}
+    if reclaim_info is not None:
+        result["reclaim_info"] = reclaim_info
+    return result
 
 
 def _find_stage_lock(
