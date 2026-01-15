@@ -1,9 +1,11 @@
 """SSIS Audio Pipeline - Ingest API FastAPI application.
 
 FastAPI service for audio file ingestion.
-Step 2: local + upload ingest endpoints with persistence and idempotency.
+Step 2 business logic: local + upload ingest endpoints with persistence and idempotency.
 
-NO orchestrator logic, NO workers, NO Huey dispatch. DB records only.
+On successful ingest, a best-effort non-blocking enqueue of the orchestrator tick
+is triggered (Step 3). The orchestrator handles stage planning and dispatch; this
+module does NOT contain orchestrator logic or DSP processing.
 
 Run with:
     uvicorn services.ingest_api.main:app --reload  # dev server only
@@ -65,15 +67,45 @@ def get_db_session():
 # --- Lifespan ---
 
 
+def _cleanup_orphan_temp_files_safe() -> None:
+    """Clean up orphan temp files on startup (best-effort).
+
+    Per resilience plan: wire into startup, never crash on errors.
+    Targets canonical audio directories under data/audio/.
+    """
+    from app.config import AUDIO_DIR
+    from app.utils.atomic_io import cleanup_orphan_temp_files
+
+    try:
+        # Recursively clean up temp files under audio directory
+        if AUDIO_DIR.exists():
+            total_cleaned = 0
+            # Clean top-level
+            total_cleaned += cleanup_orphan_temp_files(AUDIO_DIR)
+            # Clean asset subdirectories
+            for subdir in AUDIO_DIR.iterdir():
+                if subdir.is_dir():
+                    total_cleaned += cleanup_orphan_temp_files(subdir)
+            if total_cleaned > 0:
+                logger.info("Startup cleanup: removed %d orphan temp files", total_cleaned)
+    except Exception:
+        # Best-effort: never crash startup
+        logger.warning("Startup cleanup failed (non-fatal)", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler.
 
-    Initializes database on startup.
+    Initializes database on startup and cleans up orphan temp files.
     """
     # Startup: initialize database
     global _session_factory
     _, _session_factory = init_db()
+
+    # Startup: clean up orphan temp files (best-effort, never fails)
+    _cleanup_orphan_temp_files_safe()
+
     yield
     # Shutdown: nothing special needed
 

@@ -4,12 +4,12 @@ Core ingest business logic implementing:
 - Idempotency via (owner_entity_id, content_hash)
 - Atomic file persistence
 - AudioAsset + PipelineJob DB record creation
-
-NO orchestrator logic, NO workers, NO Huey. Step 2 scope only.
+- Best-effort orchestrator enqueue on successful ingest (Huey)
 """
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -29,6 +29,8 @@ from app.utils.paths import audio_original_path
 
 if TYPE_CHECKING:
     from typing import BinaryIO
+
+logger = logging.getLogger(__name__)
 
 
 # --- Error Codes (Blueprint section 8) ---
@@ -214,6 +216,9 @@ def ingest_local_file(
             pass
         raise IngestFailedError(f"Database commit failed: {e}") from e
 
+    # Enqueue orchestrator tick (non-blocking)
+    _enqueue_orchestrator_tick_safe(asset_id)
+
     return IngestResult(
         asset_id=asset_id,
         job_id=job_id,
@@ -337,6 +342,9 @@ def ingest_upload_stream(
                 pass
             raise IngestFailedError(f"Database commit failed: {e}") from e
 
+        # Enqueue orchestrator tick (non-blocking)
+        _enqueue_orchestrator_tick_safe(asset_id)
+
         return IngestResult(
             asset_id=asset_id,
             job_id=job_id,
@@ -449,3 +457,26 @@ def _create_ingest_job(
     session.flush()
 
     return job_id
+
+
+def _enqueue_orchestrator_tick_safe(asset_id: str) -> None:
+    """Enqueue orchestrator tick, silently handling errors.
+
+    This is non-blocking and best-effort. If Huey is not available
+    or enqueueing fails, we log the error but do not fail the ingest.
+
+    Args:
+        asset_id: The asset ID to enqueue for processing.
+    """
+    try:
+        from app.huey_app import enqueue_orchestrator_tick
+
+        enqueue_orchestrator_tick(asset_id)
+        logger.debug("Enqueued orchestrator tick for asset_id=%s", asset_id)
+    except Exception:
+        # Best-effort: log but do not fail ingest
+        logger.warning(
+            "Failed to enqueue orchestrator tick for asset_id=%s (non-fatal)",
+            asset_id,
+            exc_info=True,
+        )
