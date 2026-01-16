@@ -50,6 +50,26 @@ The following artifacts are defined by SSIS Blueprint #1 v1.4 and will be implem
 
 - Python 3.11 or higher
 - Git
+- ffmpeg (required for decode worker)
+
+#### Installing ffmpeg
+
+The decode worker requires ffmpeg to be installed and available in PATH.
+
+**macOS (Homebrew):**
+```bash
+brew install ffmpeg
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install ffmpeg
+```
+
+**Windows:**
+Download from https://ffmpeg.org/download.html and add to PATH.
+
+> **Note:** Tests mock ffmpeg calls and do not require ffmpeg to be installed.
 
 ### Installation
 
