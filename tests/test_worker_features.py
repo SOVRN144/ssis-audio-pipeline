@@ -211,6 +211,84 @@ class TestFeatureSpecImmutability:
 class TestModelShaVerification:
     """Tests for model SHA256 verification."""
 
+    def test_placeholder_hash_fails_fast(self, temp_dirs, monkeypatch):
+        """Test that placeholder SHA file fails with FEATURE_EXTRACTION_FAILED."""
+        tmpdir, _, SessionFactory, audio_dir, features_dir = temp_dirs
+        session = SessionFactory()
+
+        asset_id = "test-placeholder-sha"
+        asset_dir = audio_dir / asset_id
+        _create_test_wav(asset_dir / "normalized.wav")
+
+        monkeypatch.setattr("app.config.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.config.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+
+        # Create fake model with PLACEHOLDER hash (typical repo placeholder)
+        yamnet_dir = Path(tmpdir) / "yamnet_onnx"
+        yamnet_dir.mkdir(parents=True, exist_ok=True)
+        (yamnet_dir / "yamnet.onnx").write_bytes(b"fake model content")
+        # Use the actual placeholder from the repo
+        (yamnet_dir / "yamnet.onnx.sha256").write_text(
+            "placeholder_sha256_for_testing_must_be_replaced_with_real_model_hash"
+        )
+
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_ONNX_PATH", yamnet_dir / "yamnet.onnx"
+        )
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_SHA256_PATH", yamnet_dir / "yamnet.onnx.sha256"
+        )
+
+        result = extract_features(session, asset_id)
+
+        assert not result.ok
+        assert result.error_code == FeaturesErrorCode.FEATURE_EXTRACTION_FAILED
+        assert "placeholder" in result.message.lower()
+
+        # Verify no HDF5 was written
+        spec_alias = feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        output_path = features_dir / f"{asset_id}.{spec_alias}.h5"
+        assert not output_path.exists()
+
+        session.close()
+
+    def test_short_hash_fails_as_placeholder(self, temp_dirs, monkeypatch):
+        """Test that short/invalid SHA fails as placeholder."""
+        tmpdir, _, SessionFactory, audio_dir, features_dir = temp_dirs
+        session = SessionFactory()
+
+        asset_id = "test-short-sha"
+        asset_dir = audio_dir / asset_id
+        _create_test_wav(asset_dir / "normalized.wav")
+
+        monkeypatch.setattr("app.config.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.config.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+
+        yamnet_dir = Path(tmpdir) / "yamnet_onnx"
+        yamnet_dir.mkdir(parents=True, exist_ok=True)
+        (yamnet_dir / "yamnet.onnx").write_bytes(b"fake model")
+        # Too short to be valid SHA256
+        (yamnet_dir / "yamnet.onnx.sha256").write_text("abc123")
+
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_ONNX_PATH", yamnet_dir / "yamnet.onnx"
+        )
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_SHA256_PATH", yamnet_dir / "yamnet.onnx.sha256"
+        )
+
+        result = extract_features(session, asset_id)
+
+        assert not result.ok
+        assert result.error_code == FeaturesErrorCode.FEATURE_EXTRACTION_FAILED
+        assert "placeholder" in result.message.lower()
+
+        session.close()
+
     def test_matching_hash_passes(self, temp_dirs, monkeypatch):
         """Test that matching model hash allows extraction to proceed."""
         tmpdir, _, SessionFactory, audio_dir, features_dir = temp_dirs

@@ -198,8 +198,14 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
         logger.debug("No pending stages for asset_id=%s", asset_id)
         return {"status": "no_work", "asset_id": asset_id, "reason": "all_stages_complete"}
 
-    # 4. Check if artifact already exists (skip if so)
-    if _artifact_exists(session, asset_id, next_stage):
+    # 4. Compute feature_spec_alias for STAGE_FEATURES (used consistently for lock/job/release)
+    # This MUST be computed BEFORE lock acquisition to prevent lock-alias mismatch leaks
+    feature_spec_alias = None
+    if next_stage == STAGE_FEATURES:
+        feature_spec_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+    # 5. Check if artifact already exists (skip if so)
+    if _artifact_exists(session, asset_id, next_stage, feature_spec_alias):
         logger.info("Artifact for stage %s already exists for asset_id=%s", next_stage, asset_id)
         return {
             "status": "skipped",
@@ -208,8 +214,8 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
             "reason": "artifact_exists",
         }
 
-    # 5. Check for existing lock
-    lock_result = _handle_stage_lock(session, asset_id, next_stage)
+    # 6. Check for existing lock (using computed alias for STAGE_FEATURES)
+    lock_result = _handle_stage_lock(session, asset_id, next_stage, feature_spec_alias)
     if lock_result["action"] == "skip":
         return {
             "status": "skipped",
@@ -218,10 +224,15 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
             "reason": lock_result["reason"],
         }
 
-    # 6. Create or update the PipelineJob for this stage
-    job = _get_or_create_stage_job(session, asset_id, next_stage)
+    # 7. Create or update the PipelineJob for this stage (with alias for STAGE_FEATURES)
+    job = _get_or_create_stage_job(session, asset_id, next_stage, feature_spec_alias)
 
-    # 6a. Record lock reclaim metric if applicable
+    # 7a. Ensure job.feature_spec_alias is set consistently (may be None for newly created jobs)
+    if next_stage == STAGE_FEATURES and job.feature_spec_alias != feature_spec_alias:
+        job.feature_spec_alias = feature_spec_alias
+        session.flush()
+
+    # 8. Record lock reclaim metric if applicable
     if "reclaim_info" in lock_result:
         reclaim_info = lock_result["reclaim_info"]
         _record_lock_reclaim_metric(
@@ -231,7 +242,7 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
         )
         session.flush()
 
-    # 7. Check if this is a retry scenario
+    # 9. Check if this is a retry scenario
     if job.status == "failed" and job.attempt >= MAX_ATTEMPTS_TOTAL:
         # Should have been caught as dead_letter, but handle defensively
         _mark_dead_letter(session, job, "Max attempts exceeded")
@@ -242,12 +253,12 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
             "job_id": job.job_id,
         }
 
-    # 8. Update job status to running
+    # 10. Update job status to running
     job.status = "running"
     job.started_at = utc_now()
     session.flush()
 
-    # 9. Dispatch the stage worker task
+    # 11. Dispatch the stage worker task
     from app.huey_app import enqueue_stage_worker
 
     enqueue_stage_worker(job.job_id, asset_id, next_stage)
@@ -429,7 +440,13 @@ def _execute_features_stage(session: Session, job: PipelineJob, asset_id: str) -
     from services.worker_features.run import extract_features
 
     # Get the feature_spec_alias for this job (default v1.4 spec)
+    # This MUST match what was used for lock acquisition in _orchestrator_tick_impl
     spec_alias = job.feature_spec_alias or compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+    # Ensure job.feature_spec_alias is set if it was None (for consistency in failure path)
+    if job.feature_spec_alias is None:
+        job.feature_spec_alias = spec_alias
+        session.flush()
 
     # Run the features worker
     result = extract_features(session, asset_id)
@@ -455,6 +472,7 @@ def _execute_features_stage(session: Session, job: PipelineJob, asset_id: str) -
         )
 
         _mark_job_completed(session, job)
+        # Release lock with the SAME alias used for acquisition
         _release_stage_lock(session, asset_id, STAGE_FEATURES, spec_alias)
 
         return {
@@ -466,6 +484,7 @@ def _execute_features_stage(session: Session, job: PipelineJob, asset_id: str) -
         }
     else:
         # Failure - trigger retry logic
+        # Note: _handle_stage_failure will use job.feature_spec_alias (now guaranteed set)
         error_code = result.error_code or "WORKER_ERROR"
         error_message = result.message or "Feature extraction failed"
 

@@ -119,6 +119,31 @@ class FeaturesResult:
 # --- Model Verification ---
 
 
+def _is_placeholder_hash(hash_value: str) -> bool:
+    """Check if a hash value appears to be a placeholder.
+
+    Args:
+        hash_value: The hash string to check.
+
+    Returns:
+        True if the hash appears to be a placeholder, False otherwise.
+    """
+    # Check for common placeholder indicators
+    lower_hash = hash_value.lower()
+
+    # Must be valid hex and exactly 64 characters for SHA256
+    if len(hash_value) != 64:
+        return True
+    if not all(c in "0123456789abcdef" for c in lower_hash):
+        return True
+
+    # Check for placeholder keywords
+    if "placeholder" in lower_hash or "todo" in lower_hash:
+        return True
+
+    return False
+
+
 def _verify_model_integrity() -> tuple[bool, str | None, str | None]:
     """Verify ONNX model integrity via SHA256 hash.
 
@@ -139,6 +164,14 @@ def _verify_model_integrity() -> tuple[bool, str | None, str | None]:
         # Handle "hash  filename" format
         if " " in expected_hash:
             expected_hash = expected_hash.split()[0]
+
+        # Guard: fail fast if placeholder hash detected
+        if _is_placeholder_hash(expected_hash):
+            return (
+                False,
+                None,
+                "yamnet.onnx.sha256 placeholder detected - replace with real SHA256 digest",
+            )
 
         # Compute actual hash
         actual_hash = sha256_file(YAMNET_ONNX_PATH)
@@ -219,9 +252,6 @@ def _compute_yamnet_embeddings(
     embeddings = []
     for start in range(0, len(audio) - window_samples + 1, hop_samples):
         window = audio[start : start + window_samples]
-        # Ensure window is correct length
-        if len(window) < window_samples:
-            break
 
         # YAMNet expects input shape (1, num_samples) or (num_samples,)
         # Actual shape depends on the specific ONNX model export
@@ -250,6 +280,11 @@ def _compute_yamnet_embeddings(
             embedding = embedding[:EMBEDDING_DIM]
         else:
             # Pad if needed (shouldn't happen with proper model)
+            logger.warning(
+                "Embedding dimension %d < expected %d, padding with zeros",
+                len(embedding),
+                EMBEDDING_DIM,
+            )
             embedding = np.pad(embedding, (0, EMBEDDING_DIM - len(embedding)))
 
         embeddings.append(embedding)
@@ -326,9 +361,12 @@ def _write_hdf5_atomic(
     # Ensure parent directory exists
     final_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Clean up any orphan temp file
+    # Clean up any orphan temp file (best-effort, do not block extraction)
     if temp_path.exists():
-        temp_path.unlink()
+        try:
+            temp_path.unlink()
+        except OSError:
+            logger.warning("Failed to remove orphan temp file: %s", temp_path)
 
     computed_at = datetime.now(UTC).isoformat()
 
@@ -655,6 +693,14 @@ def run_features_worker(asset_id: str) -> FeaturesResult:
     Returns:
         FeaturesResult with success/failure status and metrics.
     """
+    # Best-effort cleanup of orphan temp files at startup
+    try:
+        removed = cleanup_orphan_h5_tmp()
+        if removed > 0:
+            logger.info("Cleaned up %d orphan temp file(s) at startup", removed)
+    except Exception as e:
+        logger.warning("Failed to cleanup orphan temp files at startup: %s", e)
+
     _, SessionFactory = init_db()
     session = SessionFactory()
 
