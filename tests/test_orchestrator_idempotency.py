@@ -1,6 +1,7 @@
 """Tests for orchestrator idempotency.
 
 Step 3: Ensures running tick twice creates no duplicates.
+Step 5: Tests for STAGE_FEATURES lock alias consistency.
 """
 
 import tempfile
@@ -10,13 +11,17 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import func, select
 
+from app.config import DEFAULT_FEATURE_SPEC_ID
 from app.db import init_db
 from app.models import ArtifactIndex, AudioAsset, PipelineJob, StageLock
 from app.orchestrator import (
+    ARTIFACT_TYPE_FEATURES_H5,
     ARTIFACT_TYPE_NORMALIZED_WAV,
     STAGE_DECODE,
+    STAGE_FEATURES,
     _orchestrator_tick_impl,
 )
+from app.utils.hashing import feature_spec_alias as compute_feature_spec_alias
 
 
 @pytest.fixture
@@ -125,17 +130,17 @@ class TestOrchestratorIdempotency:
         finally:
             session.close()
 
-    def test_skip_if_artifact_exists_in_index(self, asset_with_ingest):
-        """Should skip if artifact is recorded in artifact_index.
+    def test_skip_decode_if_artifact_exists_in_index(self, asset_with_ingest):
+        """Should skip decode if artifact is recorded in artifact_index.
 
-        When artifact exists, _determine_next_stage returns None,
-        so the result is "no_work" with reason "all_stages_complete".
+        When decode artifact exists, the next stage is features.
+        This test verifies decode is skipped but features is dispatched.
         """
         asset_id, SessionFactory = asset_with_ingest
 
         session = SessionFactory()
         try:
-            # Pre-record artifact in index
+            # Pre-record decode artifact in index
             artifact = ArtifactIndex(
                 asset_id=asset_id,
                 artifact_type=ARTIFACT_TYPE_NORMALIZED_WAV,
@@ -147,9 +152,10 @@ class TestOrchestratorIdempotency:
 
             result = _orchestrator_tick_impl(session, asset_id)
 
-            # Artifact exists means decode stage is complete => all stages complete
-            assert result["status"] == "no_work"
-            assert result["reason"] == "all_stages_complete"
+            # Decode artifact exists => decode is skipped, features is dispatched
+            # (or features artifact check fails, but decode stage is still skipped)
+            assert result["status"] == "dispatched"
+            assert result["stage"] == "features"
 
             # Verify no lock or job created for decode
             lock_stmt = (
@@ -176,11 +182,11 @@ class TestOrchestratorIdempotency:
         finally:
             session.close()
 
-    def test_skip_if_artifact_exists_on_filesystem(self, asset_with_ingest):
-        """Should skip if artifact file exists on filesystem.
+    def test_skip_decode_if_artifact_exists_on_filesystem(self, asset_with_ingest):
+        """Should skip decode if artifact file exists on filesystem.
 
-        When artifact exists, _determine_next_stage returns None,
-        so the result is "no_work" with reason "all_stages_complete".
+        When decode artifact exists on filesystem, decode is skipped
+        and features stage is dispatched next.
         """
         asset_id, SessionFactory = asset_with_ingest
 
@@ -201,9 +207,9 @@ class TestOrchestratorIdempotency:
                     try:
                         result = _orchestrator_tick_impl(session, asset_id)
 
-                        # Artifact exists means decode stage is complete => all stages complete
-                        assert result["status"] == "no_work"
-                        assert result["reason"] == "all_stages_complete"
+                        # Decode artifact exists => decode skipped, features dispatched
+                        assert result["status"] == "dispatched"
+                        assert result["stage"] == "features"
                     finally:
                         session.close()
 
@@ -346,14 +352,14 @@ class TestStaleLockReclamation:
         """
         asset_id, SessionFactory = asset_with_ingest
 
-        from datetime import datetime, timedelta
+        from datetime import UTC, datetime, timedelta
 
         session = SessionFactory()
         try:
             # Create a stale lock with NAIVE datetime (no tzinfo) - simulates SQLite behavior
             # We need to bypass SQLAlchemy's default handling, so use raw datetime
-            past_naive = datetime.utcnow() - timedelta(hours=1)
-            expired_naive = datetime.utcnow() - timedelta(minutes=30)
+            past_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+            expired_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=30)
 
             stale_lock = StageLock(
                 asset_id=asset_id,
@@ -435,5 +441,176 @@ class TestStaleLockReclamation:
             assert event["reclaimed_worker_id"] == "metrics-test-worker"
             assert "expired_at" in event
             assert "reclaimed_at" in event
+        finally:
+            session.close()
+
+
+class TestFeaturesLockAliasConsistency:
+    """Tests for STAGE_FEATURES lock alias consistency (prevents lock leaks)."""
+
+    @pytest.fixture
+    def asset_with_decode_complete(self, test_db):
+        """Create an asset with completed ingest and decode jobs."""
+        session = test_db()
+        try:
+            asset_id = "test-features-lock"
+
+            asset = AudioAsset(
+                asset_id=asset_id,
+                content_hash="features-lock-test",
+                source_uri=f"/data/audio/{asset_id}/original.wav",
+                original_filename="test.wav",
+            )
+            session.add(asset)
+
+            # Completed ingest job
+            ingest_job = PipelineJob(
+                job_id="ingest-features-lock",
+                asset_id=asset_id,
+                stage="ingest",
+                status="completed",
+                attempt=1,
+            )
+            session.add(ingest_job)
+
+            # Completed decode job
+            decode_job = PipelineJob(
+                job_id="decode-features-lock",
+                asset_id=asset_id,
+                stage=STAGE_DECODE,
+                status="completed",
+                attempt=1,
+            )
+            session.add(decode_job)
+
+            # Decode artifact exists
+            artifact = ArtifactIndex(
+                asset_id=asset_id,
+                artifact_type=ARTIFACT_TYPE_NORMALIZED_WAV,
+                artifact_path=f"/data/audio/{asset_id}/normalized.wav",
+                schema_version="1.0.0",
+            )
+            session.add(artifact)
+
+            session.commit()
+            yield asset_id, test_db
+        finally:
+            session.close()
+
+    def test_features_lock_acquired_with_alias(self, asset_with_decode_complete):
+        """Lock for STAGE_FEATURES must be acquired with computed alias."""
+        asset_id, SessionFactory = asset_with_decode_complete
+        expected_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+        session = SessionFactory()
+        try:
+            with patch("app.huey_app.enqueue_stage_worker"):
+                result = _orchestrator_tick_impl(session, asset_id)
+                session.commit()
+
+            assert result["status"] == "dispatched"
+            assert result["stage"] == STAGE_FEATURES
+
+            # Verify lock was acquired with the correct alias
+            stmt = select(StageLock).where(
+                StageLock.asset_id == asset_id,
+                StageLock.stage == STAGE_FEATURES,
+            )
+            lock = session.execute(stmt).scalar_one()
+            assert lock.feature_spec_alias == expected_alias
+        finally:
+            session.close()
+
+    def test_features_job_has_alias_set(self, asset_with_decode_complete):
+        """PipelineJob for STAGE_FEATURES must have feature_spec_alias set."""
+        asset_id, SessionFactory = asset_with_decode_complete
+        expected_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+        session = SessionFactory()
+        try:
+            with patch("app.huey_app.enqueue_stage_worker"):
+                result = _orchestrator_tick_impl(session, asset_id)
+                session.commit()
+
+            assert result["status"] == "dispatched"
+
+            # Verify job has feature_spec_alias set
+            stmt = select(PipelineJob).where(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == STAGE_FEATURES,
+            )
+            job = session.execute(stmt).scalar_one()
+            assert job.feature_spec_alias == expected_alias
+        finally:
+            session.close()
+
+    def test_features_tick_twice_respects_lock_with_alias(self, asset_with_decode_complete):
+        """Second tick should skip due to active lock (with alias)."""
+        asset_id, SessionFactory = asset_with_decode_complete
+
+        session = SessionFactory()
+        try:
+            with patch("app.huey_app.enqueue_stage_worker"):
+                # First tick
+                result1 = _orchestrator_tick_impl(session, asset_id)
+                session.commit()
+
+                # Second tick
+                result2 = _orchestrator_tick_impl(session, asset_id)
+                session.commit()
+
+            assert result1["status"] == "dispatched"
+            assert result2["status"] == "skipped"
+            assert result2["reason"] == "lock_active"
+
+            # Verify only one lock exists
+            stmt = (
+                select(func.count())
+                .select_from(StageLock)
+                .where(
+                    StageLock.asset_id == asset_id,
+                    StageLock.stage == STAGE_FEATURES,
+                )
+            )
+            count = session.execute(stmt).scalar()
+            assert count == 1
+        finally:
+            session.close()
+
+    def test_features_artifact_skip_with_alias(self, asset_with_decode_complete):
+        """Should skip STAGE_FEATURES if artifact with matching alias exists."""
+        asset_id, SessionFactory = asset_with_decode_complete
+        expected_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+        session = SessionFactory()
+        try:
+            # Pre-create features artifact with the expected alias
+            features_artifact = ArtifactIndex(
+                asset_id=asset_id,
+                artifact_type=ARTIFACT_TYPE_FEATURES_H5,
+                artifact_path=f"/data/features/{asset_id}.{expected_alias}.h5",
+                feature_spec_alias=expected_alias,
+                schema_version="1.0.0",
+            )
+            session.add(features_artifact)
+            session.commit()
+
+            result = _orchestrator_tick_impl(session, asset_id)
+
+            # All stages complete - no work
+            assert result["status"] == "no_work"
+            assert result["reason"] == "all_stages_complete"
+
+            # Verify no lock created
+            stmt = (
+                select(func.count())
+                .select_from(StageLock)
+                .where(
+                    StageLock.asset_id == asset_id,
+                    StageLock.stage == STAGE_FEATURES,
+                )
+            )
+            count = session.execute(stmt).scalar()
+            assert count == 0
         finally:
             session.close()

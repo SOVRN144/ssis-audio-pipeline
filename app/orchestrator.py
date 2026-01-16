@@ -38,12 +38,14 @@ from typing import TYPE_CHECKING
 from sqlalchemy import and_, select
 
 from app.config import (
+    DEFAULT_FEATURE_SPEC_ID,
     MAX_ATTEMPTS_TOTAL,
     RETRY_DELAYS_SECONDS,
 )
 from app.db import create_stage_lock, init_db
 from app.models import ArtifactIndex, PipelineJob, StageLock, utc_now
-from app.utils.paths import audio_normalized_path
+from app.utils.hashing import feature_spec_alias as compute_feature_spec_alias
+from app.utils.paths import audio_normalized_path, features_h5_path
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -56,8 +58,14 @@ logger = logging.getLogger(__name__)
 # Stage that follows ingest (Step 3 scope)
 STAGE_DECODE = "decode"
 
+# Stage that follows decode (Step 5 scope)
+STAGE_FEATURES = "features"
+
 # Artifact type for decode stage output
 ARTIFACT_TYPE_NORMALIZED_WAV = "normalized_wav"
+
+# Artifact type for features stage output
+ARTIFACT_TYPE_FEATURES_H5 = "feature_pack"
 
 # Maximum lock reclaim events to store in metrics_json (prevent unbounded growth)
 MAX_LOCK_RECLAIM_EVENTS = 10
@@ -190,8 +198,14 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
         logger.debug("No pending stages for asset_id=%s", asset_id)
         return {"status": "no_work", "asset_id": asset_id, "reason": "all_stages_complete"}
 
-    # 4. Check if artifact already exists (skip if so)
-    if _artifact_exists(session, asset_id, next_stage):
+    # 4. Compute feature_spec_alias for STAGE_FEATURES (used consistently for lock/job/release)
+    # This MUST be computed BEFORE lock acquisition to prevent lock-alias mismatch leaks
+    feature_spec_alias = None
+    if next_stage == STAGE_FEATURES:
+        feature_spec_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+    # 5. Check if artifact already exists (skip if so)
+    if _artifact_exists(session, asset_id, next_stage, feature_spec_alias):
         logger.info("Artifact for stage %s already exists for asset_id=%s", next_stage, asset_id)
         return {
             "status": "skipped",
@@ -200,8 +214,8 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
             "reason": "artifact_exists",
         }
 
-    # 5. Check for existing lock
-    lock_result = _handle_stage_lock(session, asset_id, next_stage)
+    # 6. Check for existing lock (using computed alias for STAGE_FEATURES)
+    lock_result = _handle_stage_lock(session, asset_id, next_stage, feature_spec_alias)
     if lock_result["action"] == "skip":
         return {
             "status": "skipped",
@@ -210,10 +224,15 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
             "reason": lock_result["reason"],
         }
 
-    # 6. Create or update the PipelineJob for this stage
-    job = _get_or_create_stage_job(session, asset_id, next_stage)
+    # 7. Create or update the PipelineJob for this stage (with alias for STAGE_FEATURES)
+    job = _get_or_create_stage_job(session, asset_id, next_stage, feature_spec_alias)
 
-    # 6a. Record lock reclaim metric if applicable
+    # 7a. Ensure job.feature_spec_alias is set consistently (may be None for newly created jobs)
+    if next_stage == STAGE_FEATURES and job.feature_spec_alias != feature_spec_alias:
+        job.feature_spec_alias = feature_spec_alias
+        session.flush()
+
+    # 8. Record lock reclaim metric if applicable
     if "reclaim_info" in lock_result:
         reclaim_info = lock_result["reclaim_info"]
         _record_lock_reclaim_metric(
@@ -223,7 +242,7 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
         )
         session.flush()
 
-    # 7. Check if this is a retry scenario
+    # 9. Check if this is a retry scenario
     if job.status == "failed" and job.attempt >= MAX_ATTEMPTS_TOTAL:
         # Should have been caught as dead_letter, but handle defensively
         _mark_dead_letter(session, job, "Max attempts exceeded")
@@ -234,12 +253,12 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
             "job_id": job.job_id,
         }
 
-    # 8. Update job status to running
+    # 10. Update job status to running
     job.status = "running"
     job.started_at = utc_now()
     session.flush()
 
-    # 9. Dispatch the stage worker task
+    # 11. Dispatch the stage worker task
     from app.huey_app import enqueue_stage_worker
 
     enqueue_stage_worker(job.job_id, asset_id, next_stage)
@@ -300,7 +319,7 @@ def _execute_stage_impl(session: Session, job_id: str, asset_id: str, stage: str
     """Implementation of stage execution.
 
     Dispatches to the appropriate worker based on stage.
-    Currently implements: decode (Step 4).
+    Currently implements: decode (Step 4), features (Step 5).
 
     Args:
         session: Database session.
@@ -321,6 +340,9 @@ def _execute_stage_impl(session: Session, job_id: str, asset_id: str, stage: str
 
     if stage == STAGE_DECODE:
         return _execute_decode_stage(session, job, asset_id)
+
+    if stage == STAGE_FEATURES:
+        return _execute_features_stage(session, job, asset_id)
 
     # Unknown stage
     logger.error("Unknown stage: %s", stage)
@@ -399,6 +421,86 @@ def _execute_decode_stage(session: Session, job: PipelineJob, asset_id: str) -> 
             "status": "failed",
             "job_id": job.job_id,
             "stage": STAGE_DECODE,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
+
+
+def _execute_features_stage(session: Session, job: PipelineJob, asset_id: str) -> dict:
+    """Execute the features stage using the features worker.
+
+    Args:
+        session: Database session.
+        job: The PipelineJob record.
+        asset_id: The asset ID.
+
+    Returns:
+        Dict with execution result.
+    """
+    from services.worker_features.run import extract_features
+
+    # Get the feature_spec_alias for this job (default v1.4 spec)
+    # This MUST match what was used for lock acquisition in _orchestrator_tick_impl
+    spec_alias = job.feature_spec_alias or compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+    # Ensure job.feature_spec_alias is set if it was None (for consistency in failure path)
+    if job.feature_spec_alias is None:
+        job.feature_spec_alias = spec_alias
+        session.flush()
+
+    # Run the features worker
+    result = extract_features(session, asset_id)
+
+    if result.ok:
+        # Success - record artifact and update job
+        if result.artifact_path and result.artifact_type:
+            _record_artifact(
+                session,
+                asset_id,
+                result.artifact_type,
+                result.artifact_path,
+                feature_spec_alias=result.feature_spec_alias,
+                schema_version=result.schema_version or "1.0.0",
+            )
+
+        # Update job metrics
+        _update_job_metrics(
+            session,
+            job,
+            "features",
+            result.metrics,
+        )
+
+        _mark_job_completed(session, job)
+        # Release lock with the SAME alias used for acquisition
+        _release_stage_lock(session, asset_id, STAGE_FEATURES, spec_alias)
+
+        return {
+            "status": "completed",
+            "job_id": job.job_id,
+            "stage": STAGE_FEATURES,
+            "artifact_path": result.artifact_path,
+            "metrics": result.metrics,
+        }
+    else:
+        # Failure - trigger retry logic
+        # Note: _handle_stage_failure will use job.feature_spec_alias (now guaranteed set)
+        error_code = result.error_code or "WORKER_ERROR"
+        error_message = result.message or "Feature extraction failed"
+
+        logger.warning(
+            "Features failed for asset_id=%s: %s - %s",
+            asset_id,
+            error_code,
+            error_message,
+        )
+
+        _handle_stage_failure(session, job.job_id, error_code, error_message)
+
+        return {
+            "status": "failed",
+            "job_id": job.job_id,
+            "stage": STAGE_FEATURES,
             "error_code": error_code,
             "error_message": error_message,
         }
@@ -718,6 +820,29 @@ def _artifact_exists(
         )
         return session.execute(stmt).scalar_one_or_none() is not None
 
+    if stage == STAGE_FEATURES:
+        # For features stage, use the provided alias or compute default
+        alias = (
+            feature_spec_alias
+            if feature_spec_alias
+            else compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        )
+        artifact_path = features_h5_path(asset_id, alias)
+
+        # Check filesystem first (authoritative)
+        if artifact_path.exists():
+            return True
+
+        # Check artifact_index
+        stmt = select(ArtifactIndex).where(
+            and_(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == ARTIFACT_TYPE_FEATURES_H5,
+                ArtifactIndex.feature_spec_alias == alias,
+            )
+        )
+        return session.execute(stmt).scalar_one_or_none() is not None
+
     # Unknown stage - assume no artifact
     return False
 
@@ -870,7 +995,7 @@ def _get_or_create_stage_job(
 def _determine_next_stage(session: Session, asset_id: str) -> str | None:
     """Determine the next stage to process for an asset.
 
-    Stage progression: ingest -> decode (Step 3 only supports decode)
+    Stage progression: ingest -> decode -> features
 
     Args:
         session: Database session.
@@ -904,7 +1029,31 @@ def _determine_next_stage(session: Session, asset_id: str) -> str | None:
         # pending/failed/running - orchestrator will handle
         return STAGE_DECODE
 
-    # All stages complete (Step 3: only decode)
+    # Decode complete - check if features is needed (default v1.4 spec)
+    default_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+    if not _artifact_exists(session, asset_id, STAGE_FEATURES, default_alias):
+        # Check for running/pending job
+        stmt = select(PipelineJob).where(
+            and_(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == STAGE_FEATURES,
+            )
+        )
+        existing_job = session.execute(stmt).scalar_one_or_none()
+
+        if existing_job is None:
+            return STAGE_FEATURES
+
+        if existing_job.status == "completed":
+            return None
+
+        if existing_job.status == "dead_letter":
+            return None  # Don't retry dead-letter
+
+        # pending/failed/running - orchestrator will handle
+        return STAGE_FEATURES
+
+    # All stages complete
     return None
 
 

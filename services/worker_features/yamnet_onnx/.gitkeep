@@ -1,0 +1,7 @@
+# Placeholder directory for YAMNet ONNX model files.
+# The actual yamnet.onnx model file is not committed to the repository
+# due to its size. It should be downloaded separately.
+#
+# Required files:
+# - yamnet.onnx: The YAMNet ONNX model
+# - yamnet.onnx.sha256: SHA256 hash of the model for integrity verification
