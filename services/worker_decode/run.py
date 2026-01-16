@@ -73,6 +73,9 @@ ARTIFACT_SCHEMA_VERSION = "1.0.0"
 # Must be < 600s lock TTL to allow orchestrator retry on timeout
 FFMPEG_TIMEOUT_SECONDS = 300  # 5 minutes per chunk
 
+# Fraction of chunk size to accept as valid on final chunk
+EOF_CHUNK_TOLERANCE = 0.9
+
 # File naming conventions
 PCM_TEMP_SUFFIX = ".pcm.tmp"
 CHECKPOINT_SUFFIX = ".ckpt.json"
@@ -225,6 +228,9 @@ def _decode_chunk(
             stderr = result.stderr.decode("utf-8", errors="replace").lower()
 
             # Check for codec/format issues
+            # Note: "no such file" refers to ffmpeg's internal codec/format lookup
+            # errors (e.g., missing decoder library), not missing input files.
+            # Input file existence is validated before _decode_chunk is called.
             if any(
                 x in stderr
                 for x in [
@@ -419,7 +425,7 @@ def decode_asset(
             with wave.open(str(paths["normalized_wav"]), "rb") as wf:
                 duration = wf.getnframes() / wf.getframerate()
                 metrics.output_duration_sec = duration
-        except Exception:
+        except (OSError, wave.Error):
             pass
         return DecodeResult(
             ok=True,
@@ -558,7 +564,7 @@ def decode_asset(
                 logger.debug("Chunk %d complete: %.2f seconds processed", chunk_count, current_pos)
 
                 # If we got less than a full chunk, we've reached EOF
-                if chunk_duration < CHUNK_SECONDS * 0.9:  # Allow 10% tolerance
+                if chunk_duration < CHUNK_SECONDS * EOF_CHUNK_TOLERANCE:  # Allow 10% tolerance
                     logger.debug("Short chunk detected, EOF reached")
                     break
 
