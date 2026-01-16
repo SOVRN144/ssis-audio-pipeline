@@ -69,6 +69,10 @@ SAMPWIDTH = 2  # 16-bit = 2 bytes
 # Schema version for normalized WAV artifact
 ARTIFACT_SCHEMA_VERSION = "1.0.0"
 
+# ffmpeg subprocess timeout in seconds
+# Must be < 600s lock TTL to allow orchestrator retry on timeout
+FFMPEG_TIMEOUT_SECONDS = 300  # 5 minutes per chunk
+
 # File naming conventions
 PCM_TEMP_SUFFIX = ".pcm.tmp"
 CHECKPOINT_SUFFIX = ".ckpt.json"
@@ -214,6 +218,7 @@ def _decode_chunk(
             cmd,
             capture_output=True,
             check=False,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
         )
 
         if result.returncode != 0:
@@ -238,6 +243,14 @@ def _decode_chunk(
 
         return result.stdout, None
 
+    except subprocess.TimeoutExpired:
+        # Deterministic worker failure. Orchestrator will retry via Step 3 retry policy.
+        logger.error(
+            "ffmpeg timed out after %d seconds at position %.2fs",
+            FFMPEG_TIMEOUT_SECONDS,
+            start_seconds,
+        )
+        return b"", DecodeErrorCode.WORKER_ERROR
     except FileNotFoundError:
         # ffmpeg not installed
         logger.error("ffmpeg not found in PATH")
@@ -311,6 +324,10 @@ def _load_decode_checkpoint(checkpoint_path: Path) -> dict | None:
 
 def _wrap_pcm_to_wav(pcm_path: Path, wav_path: Path) -> float:
     """Wrap raw PCM data into a WAV file.
+
+    Note: Current implementation reads full PCM file into memory.
+    Acceptable for Step 4 baseline; streaming wrap can be added
+    later if needed for multi-hour assets.
 
     Args:
         pcm_path: Path to raw PCM file.

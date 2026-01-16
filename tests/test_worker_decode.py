@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import struct
+import subprocess
 import tempfile
 import wave
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.utils.checkpoints import save_checkpoint
 from services.worker_decode.run import (
     ARTIFACT_SCHEMA_VERSION,
     CHANNELS,
+    FFMPEG_TIMEOUT_SECONDS,
     PCM_TEMP_SUFFIX,
     SAMPLE_RATE,
     SAMPWIDTH,
@@ -159,7 +161,7 @@ class TestCheckpointResume:
 
         call_count = [0]
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             call_count[0] += 1
             result = mock.Mock()
             result.returncode = 0
@@ -232,7 +234,7 @@ class TestCheckpointResume:
         # Generate 2.5 seconds of audio (single chunk)
         chunk_pcm = _generate_pcm_bytes(2.5)
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 0
 
@@ -298,7 +300,7 @@ class TestAtomicPublish:
 
         chunk_pcm = _generate_pcm_bytes(2.5)
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 0
             if "-ss" in cmd:
@@ -350,7 +352,7 @@ class TestAtomicPublish:
 
         chunk_pcm = _generate_pcm_bytes(3.0)
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 0
             if "-ss" in cmd:
@@ -407,7 +409,7 @@ class TestAtomicPublish:
 
         chunk_pcm = _generate_pcm_bytes(2.5)
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             # Check if final exists during decode
             if (asset_dir / "normalized.wav").exists():
                 final_wav_existed_during_decode[0] = True
@@ -466,7 +468,7 @@ class TestErrorMapping:
             },
         )
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 1
             result.stdout = b""
@@ -508,7 +510,7 @@ class TestErrorMapping:
             },
         )
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 1
             result.stdout = b""
@@ -550,7 +552,7 @@ class TestErrorMapping:
             },
         )
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 0
             result.stdout = b""  # Empty output on first chunk
@@ -594,7 +596,7 @@ class TestErrorMapping:
         # Generate only 1 second of audio (below MIN_DURATION_SEC = 1.7)
         short_pcm = _generate_pcm_bytes(1.0)
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 0
             if "-ss" in cmd:
@@ -713,7 +715,7 @@ class TestMetricsWritten:
 
         chunk_pcm = _generate_pcm_bytes(3.0)
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 0
             if "-ss" in cmd:
@@ -771,7 +773,7 @@ class TestOrchestratorIntegration:
 
         chunk_pcm = _generate_pcm_bytes(2.5)
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 0
             if "-ss" in cmd:
@@ -821,7 +823,7 @@ class TestOrchestratorIntegration:
             },
         )
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             result = mock.Mock()
             result.returncode = 1
             result.stdout = b""
@@ -881,7 +883,7 @@ class TestIdempotency:
 
         ffmpeg_called = [False]
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             ffmpeg_called[0] = True
             result = mock.Mock()
             result.returncode = 0
@@ -942,7 +944,7 @@ class TestCheckpointValidation:
         chunk_pcm = _generate_pcm_bytes(2.5)
         call_positions = []
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             if "-ss" in cmd:
                 ss_idx = cmd.index("-ss")
                 ss_value = float(cmd[ss_idx + 1])
@@ -999,7 +1001,7 @@ class TestCheckpointValidation:
         chunk_pcm = _generate_pcm_bytes(2.5)
         call_positions = []
 
-        def mock_run(cmd, capture_output=True, check=False):
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
             if "-ss" in cmd:
                 ss_idx = cmd.index("-ss")
                 ss_value = float(cmd[ss_idx + 1])
@@ -1022,3 +1024,64 @@ class TestCheckpointValidation:
         assert call_positions[0] == 0
 
         session.close()
+
+
+# --- Test: Timeout Handling ---
+
+
+class TestTimeoutHandling:
+    """Tests for ffmpeg subprocess timeout handling."""
+
+    def test_timeout_returns_worker_error(self, temp_audio_dir, monkeypatch):
+        """Test that TimeoutExpired raises WORKER_ERROR and no artifact is published."""
+        tmpdir, engine, SessionFactory, audio_dir = temp_audio_dir
+        session = SessionFactory()
+
+        monkeypatch.setattr("app.config.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+
+        asset_id = "test-timeout-001"
+        asset_dir = audio_dir / asset_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+
+        source_path = asset_dir / "original.wav"
+        _create_test_source_file(source_path)
+        _create_test_asset(session, asset_id, source_path)
+        session.commit()
+
+        monkeypatch.setattr(
+            "services.worker_decode.run._get_decode_paths",
+            lambda aid: {
+                "normalized_wav": asset_dir / "normalized.wav",
+                "pcm_tmp": asset_dir / f"normalized{PCM_TEMP_SUFFIX}",
+                "checkpoint": asset_dir / "normalized.ckpt.json",
+                "wav_tmp": asset_dir / "normalized.wav.tmp",
+            },
+        )
+
+        def mock_run(cmd, capture_output=True, check=False, timeout=None):
+            # Simulate ffmpeg hanging and timing out
+            raise subprocess.TimeoutExpired(cmd, timeout or FFMPEG_TIMEOUT_SECONDS)
+
+        with mock.patch("subprocess.run", side_effect=mock_run):
+            result = decode_asset(session, asset_id)
+
+        # Should return failure with WORKER_ERROR
+        assert not result.ok
+        assert result.error_code == DecodeErrorCode.WORKER_ERROR
+
+        # No final artifact should exist
+        assert not (asset_dir / "normalized.wav").exists()
+
+        # Temp files should be cleaned up
+        assert not (asset_dir / f"normalized{PCM_TEMP_SUFFIX}").exists()
+        assert not (asset_dir / "normalized.ckpt.json").exists()
+
+        session.close()
+
+    def test_timeout_constant_below_lock_ttl(self):
+        """Verify FFMPEG_TIMEOUT_SECONDS is below the 600s lock TTL."""
+        # Lock TTL is ~600 seconds per Blueprint; timeout must be less
+        # to allow orchestrator retry on timeout
+        assert FFMPEG_TIMEOUT_SECONDS < 600
+        assert FFMPEG_TIMEOUT_SECONDS == 300  # 5 minutes as specified
