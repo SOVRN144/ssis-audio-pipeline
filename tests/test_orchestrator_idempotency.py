@@ -125,17 +125,17 @@ class TestOrchestratorIdempotency:
         finally:
             session.close()
 
-    def test_skip_if_artifact_exists_in_index(self, asset_with_ingest):
-        """Should skip if artifact is recorded in artifact_index.
+    def test_skip_decode_if_artifact_exists_in_index(self, asset_with_ingest):
+        """Should skip decode if artifact is recorded in artifact_index.
 
-        When artifact exists, _determine_next_stage returns None,
-        so the result is "no_work" with reason "all_stages_complete".
+        When decode artifact exists, the next stage is features.
+        This test verifies decode is skipped but features is dispatched.
         """
         asset_id, SessionFactory = asset_with_ingest
 
         session = SessionFactory()
         try:
-            # Pre-record artifact in index
+            # Pre-record decode artifact in index
             artifact = ArtifactIndex(
                 asset_id=asset_id,
                 artifact_type=ARTIFACT_TYPE_NORMALIZED_WAV,
@@ -147,9 +147,10 @@ class TestOrchestratorIdempotency:
 
             result = _orchestrator_tick_impl(session, asset_id)
 
-            # Artifact exists means decode stage is complete => all stages complete
-            assert result["status"] == "no_work"
-            assert result["reason"] == "all_stages_complete"
+            # Decode artifact exists => decode is skipped, features is dispatched
+            # (or features artifact check fails, but decode stage is still skipped)
+            assert result["status"] == "dispatched"
+            assert result["stage"] == "features"
 
             # Verify no lock or job created for decode
             lock_stmt = (
@@ -176,11 +177,11 @@ class TestOrchestratorIdempotency:
         finally:
             session.close()
 
-    def test_skip_if_artifact_exists_on_filesystem(self, asset_with_ingest):
-        """Should skip if artifact file exists on filesystem.
+    def test_skip_decode_if_artifact_exists_on_filesystem(self, asset_with_ingest):
+        """Should skip decode if artifact file exists on filesystem.
 
-        When artifact exists, _determine_next_stage returns None,
-        so the result is "no_work" with reason "all_stages_complete".
+        When decode artifact exists on filesystem, decode is skipped
+        and features stage is dispatched next.
         """
         asset_id, SessionFactory = asset_with_ingest
 
@@ -201,9 +202,9 @@ class TestOrchestratorIdempotency:
                     try:
                         result = _orchestrator_tick_impl(session, asset_id)
 
-                        # Artifact exists means decode stage is complete => all stages complete
-                        assert result["status"] == "no_work"
-                        assert result["reason"] == "all_stages_complete"
+                        # Decode artifact exists => decode skipped, features dispatched
+                        assert result["status"] == "dispatched"
+                        assert result["stage"] == "features"
                     finally:
                         session.close()
 
