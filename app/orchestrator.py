@@ -299,8 +299,8 @@ def execute_stage(job_id: str, asset_id: str, stage: str) -> dict:
 def _execute_stage_impl(session: Session, job_id: str, asset_id: str, stage: str) -> dict:
     """Implementation of stage execution.
 
-    Step 3: This is a stub that simulates work but does not actually process.
-    Real decode/normalize workers will be implemented in Step 4.
+    Dispatches to the appropriate worker based on stage.
+    Currently implements: decode (Step 4).
 
     Args:
         session: Database session.
@@ -320,38 +320,120 @@ def _execute_stage_impl(session: Session, job_id: str, asset_id: str, stage: str
         return {"status": "error", "job_id": job_id, "error": "job_not_found"}
 
     if stage == STAGE_DECODE:
-        # Step 3: Check if normalized.wav already exists (defensive)
-        normalized_path = audio_normalized_path(asset_id)
-        if normalized_path.exists():
-            # Artifact already exists - mark success and record in artifact_index
-            _record_artifact(session, asset_id, ARTIFACT_TYPE_NORMALIZED_WAV, str(normalized_path))
-            _mark_job_completed(session, job)
-            _release_stage_lock(session, asset_id, stage)
-            return {
-                "status": "completed",
-                "job_id": job_id,
-                "stage": stage,
-                "reason": "artifact_already_exists",
-            }
-
-        # Step 3: No real decode worker - fail with NOT_IMPLEMENTED
-        # This will trigger retry logic
-        logger.info("Decode worker not implemented (Step 3 stub): job_id=%s", job_id)
-        _handle_stage_failure(
-            session, job_id, "NOT_IMPLEMENTED", "Decode worker not implemented (Step 3)"
-        )
-        return {
-            "status": "failed",
-            "job_id": job_id,
-            "stage": stage,
-            "error_code": "NOT_IMPLEMENTED",
-            "reason": "step3_stub",
-        }
+        return _execute_decode_stage(session, job, asset_id)
 
     # Unknown stage
     logger.error("Unknown stage: %s", stage)
-    _handle_stage_failure(session, job_id, "UNKNOWN_STAGE", f"Unknown stage: {stage}")
+    _handle_stage_failure(session, job.job_id, "UNKNOWN_STAGE", f"Unknown stage: {stage}")
     return {"status": "error", "job_id": job_id, "stage": stage, "error": "unknown_stage"}
+
+
+def _execute_decode_stage(session: Session, job: PipelineJob, asset_id: str) -> dict:
+    """Execute the decode stage using the decode worker.
+
+    Args:
+        session: Database session.
+        job: The PipelineJob record.
+        asset_id: The asset ID.
+
+    Returns:
+        Dict with execution result.
+    """
+    from services.worker_decode.run import decode_asset
+
+    # Run the decode worker
+    result = decode_asset(session, asset_id)
+
+    if result.ok:
+        # Success - record artifact and update job
+        if result.artifact_path and result.artifact_type:
+            _record_artifact(
+                session,
+                asset_id,
+                result.artifact_type,
+                result.artifact_path,
+                schema_version=result.schema_version or "1.0.0",
+            )
+
+        # Update job metrics
+        _update_job_metrics(
+            session,
+            job,
+            "decode",
+            {
+                "output_duration_sec": result.metrics.output_duration_sec,
+                "chunk_count": result.metrics.chunk_count,
+                "decode_time_ms": result.metrics.decode_time_ms,
+            },
+        )
+
+        _mark_job_completed(session, job)
+        _release_stage_lock(session, asset_id, STAGE_DECODE)
+
+        return {
+            "status": "completed",
+            "job_id": job.job_id,
+            "stage": STAGE_DECODE,
+            "artifact_path": result.artifact_path,
+            "metrics": {
+                "output_duration_sec": result.metrics.output_duration_sec,
+                "chunk_count": result.metrics.chunk_count,
+                "decode_time_ms": result.metrics.decode_time_ms,
+            },
+        }
+    else:
+        # Failure - trigger retry logic
+        error_code = result.error_code or "WORKER_ERROR"
+        error_message = result.message or "Decode failed"
+
+        logger.warning(
+            "Decode failed for asset_id=%s: %s - %s",
+            asset_id,
+            error_code,
+            error_message,
+        )
+
+        _handle_stage_failure(session, job.job_id, error_code, error_message)
+
+        return {
+            "status": "failed",
+            "job_id": job.job_id,
+            "stage": STAGE_DECODE,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
+
+
+def _update_job_metrics(
+    session: Session,
+    job: PipelineJob,
+    namespace: str,
+    metrics: dict,
+) -> None:
+    """Update job metrics_json with new metrics under a namespace.
+
+    Merges metrics into existing metrics_json without overwriting other keys.
+
+    Args:
+        session: Database session.
+        job: The PipelineJob to update.
+        namespace: Namespace key for the metrics (e.g., "decode").
+        metrics: Dictionary of metrics to store.
+    """
+    # Parse existing metrics or start fresh
+    try:
+        existing = json.loads(job.metrics_json) if job.metrics_json else {}
+    except (json.JSONDecodeError, TypeError):
+        existing = {}
+
+    if not isinstance(existing, dict):
+        existing = {}
+
+    # Merge under namespace
+    existing[namespace] = metrics
+
+    job.metrics_json = json.dumps(existing)
+    session.flush()
 
 
 # --- Failure and Retry Handling ---
