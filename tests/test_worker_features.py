@@ -921,6 +921,50 @@ class TestOomMapping:
 
         session.close()
 
+    def test_memory_error_during_audio_load_maps_to_model_oom(self, temp_dirs, monkeypatch):
+        """Test that MemoryError during librosa.load maps to MODEL_OOM."""
+        tmpdir, _, SessionFactory, audio_dir, features_dir = temp_dirs
+        session = SessionFactory()
+
+        asset_id = "test-audio-load-oom"
+        asset_dir = audio_dir / asset_id
+        _create_test_wav(asset_dir / "normalized.wav")
+
+        monkeypatch.setattr("app.config.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.config.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+
+        # Setup model verification to pass
+        model_content = b"fake model for audio load oom"
+        expected_hash = hashlib.sha256(model_content).hexdigest()
+        yamnet_dir = Path(tmpdir) / "yamnet_onnx"
+        yamnet_dir.mkdir(parents=True, exist_ok=True)
+        (yamnet_dir / "yamnet.onnx").write_bytes(model_content)
+        (yamnet_dir / "yamnet.onnx.sha256").write_text(expected_hash)
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_ONNX_PATH", yamnet_dir / "yamnet.onnx"
+        )
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_SHA256_PATH", yamnet_dir / "yamnet.onnx.sha256"
+        )
+
+        def raise_memory_error(*args, **kwargs):
+            raise MemoryError("Out of memory loading audio file")
+
+        with mock.patch("librosa.load", side_effect=raise_memory_error):
+            result = extract_features(session, asset_id)
+
+        assert not result.ok
+        assert result.error_code == FeaturesErrorCode.MODEL_OOM
+
+        # Verify no HDF5 artifact written
+        spec_alias = feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        output_path = features_dir / f"{asset_id}.{spec_alias}.h5"
+        assert not output_path.exists()
+
+        session.close()
+
 
 # --- Test: Input Not Found ---
 

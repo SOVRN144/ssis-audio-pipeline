@@ -352,14 +352,14 @@ class TestStaleLockReclamation:
         """
         asset_id, SessionFactory = asset_with_ingest
 
-        from datetime import datetime, timedelta
+        from datetime import UTC, datetime, timedelta
 
         session = SessionFactory()
         try:
             # Create a stale lock with NAIVE datetime (no tzinfo) - simulates SQLite behavior
             # We need to bypass SQLAlchemy's default handling, so use raw datetime
-            past_naive = datetime.utcnow() - timedelta(hours=1)
-            expired_naive = datetime.utcnow() - timedelta(minutes=30)
+            past_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+            expired_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=30)
 
             stale_lock = StageLock(
                 asset_id=asset_id,

@@ -547,7 +547,23 @@ def extract_features(
 
         audio, sr = librosa.load(str(input_path), sr=SAMPLE_RATE, mono=True)
         audio = audio.astype(np.float32)
+    except MemoryError:
+        logger.error("OOM during audio load for asset_id=%s", asset_id)
+        return FeaturesResult(
+            ok=False,
+            error_code=FeaturesErrorCode.MODEL_OOM,
+            message="Out of memory loading audio file",
+        )
     except Exception as e:
+        error_str = str(e).lower()
+        # Check for memory-related errors that may not be MemoryError subclass
+        if "memory" in error_str or "alloc" in error_str:
+            logger.error("OOM-like error during audio load for asset_id=%s: %s", asset_id, e)
+            return FeaturesResult(
+                ok=False,
+                error_code=FeaturesErrorCode.MODEL_OOM,
+                message=f"Out of memory loading audio: {e}",
+            )
         logger.error("Failed to load audio for asset_id=%s: %s", asset_id, e)
         return FeaturesResult(
             ok=False,
