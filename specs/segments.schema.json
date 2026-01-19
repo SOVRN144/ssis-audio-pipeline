@@ -9,6 +9,7 @@
     "version",
     "asset_id",
     "computed_at",
+    "confidence_type",
     "segments"
   ],
   "additionalProperties": false,
@@ -32,6 +33,11 @@
       "type": "string",
       "format": "date-time",
       "description": "ISO 8601 timestamp when segments were computed"
+    },
+    "confidence_type": {
+      "type": "string",
+      "const": "heuristic_v1",
+      "description": "Type of confidence score (top-level)"
     },
     "segments": {
       "type": "array",
@@ -66,6 +72,11 @@
             "type": ["string", "null"],
             "const": "heuristic_v1",
             "description": "Type of confidence score"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["inaspeechsegmenter", "derived"],
+            "description": "Origin of the segment: model-emitted or derived via gap-fill"
           }
         }
       },
