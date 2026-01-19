@@ -354,6 +354,70 @@ class TestThresholdPostProcessing:
         merged = _merge_adjacent_same_label(segments)
         assert len(merged) == 2
 
+    def test_merge_propagates_derived_source(self):
+        """Test that merging mixed-source segments propagates source='derived'.
+
+        When merging same-label segments, if either side has source='derived',
+        the merged segment should have source='derived' to avoid mislabeling
+        derived material as model-emitted.
+        """
+        # First segment is model-emitted, second is derived
+        seg1 = SegmentData(
+            label="speech",
+            start_sec=0.0,
+            end_sec=1.0,
+            confidence=CONFIDENCE_BASE["speech"],
+            source=SEGMENT_SOURCE,  # "inaspeechsegmenter"
+        )
+        seg2 = SegmentData(
+            label="speech",
+            start_sec=1.2,  # Gap = 0.2s <= 0.3s, will merge
+            end_sec=2.0,
+            confidence=CONFIDENCE_BASE["speech"],
+            source=SEGMENT_SOURCE_DERIVED,  # "derived"
+        )
+        merged = _merge_adjacent_same_label([seg1, seg2])
+        assert len(merged) == 1
+        assert merged[0].source == "derived"
+
+        # Reverse order: first derived, second model-emitted
+        seg3 = SegmentData(
+            label="music",
+            start_sec=0.0,
+            end_sec=1.0,
+            confidence=CONFIDENCE_BASE["music"],
+            source=SEGMENT_SOURCE_DERIVED,
+        )
+        seg4 = SegmentData(
+            label="music",
+            start_sec=1.1,  # Gap = 0.1s <= 0.3s, will merge
+            end_sec=2.0,
+            confidence=CONFIDENCE_BASE["music"],
+            source=SEGMENT_SOURCE,
+        )
+        merged2 = _merge_adjacent_same_label([seg3, seg4])
+        assert len(merged2) == 1
+        assert merged2[0].source == "derived"
+
+        # Both model-emitted: should keep model source
+        seg5 = SegmentData(
+            label="silence",
+            start_sec=0.0,
+            end_sec=1.0,
+            confidence=CONFIDENCE_BASE["silence"],
+            source=SEGMENT_SOURCE,
+        )
+        seg6 = SegmentData(
+            label="silence",
+            start_sec=1.1,
+            end_sec=2.0,
+            confidence=CONFIDENCE_BASE["silence"],
+            source=SEGMENT_SOURCE,
+        )
+        merged3 = _merge_adjacent_same_label([seg5, seg6])
+        assert len(merged3) == 1
+        assert merged3[0].source == SEGMENT_SOURCE
+
 
 # --- Test E: flip_rate Computation ---
 

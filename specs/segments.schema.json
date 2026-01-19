@@ -69,7 +69,7 @@
             "description": "Heuristic confidence score (not calibrated)"
           },
           "confidence_type": {
-            "type": ["string", "null"],
+            "type": "string",
             "const": "heuristic_v1",
             "description": "Type of confidence score"
           },

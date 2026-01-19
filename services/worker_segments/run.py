@@ -296,13 +296,20 @@ def _merge_adjacent_same_label(segments: list[SegmentData]) -> list[SegmentData]
         gap = seg.start_sec - current.end_sec
         if seg.label == current.label and gap <= MERGE_GAP_SEC:
             # Merge: extend current segment, average confidence
+            # Propagate "derived" if either side is derived to avoid
+            # mislabeling derived material as model-emitted
+            merged_source = (
+                "derived"
+                if (current.source == "derived" or seg.source == "derived")
+                else current.source
+            )
             avg_conf = (current.confidence + seg.confidence) / 2
             current = SegmentData(
                 label=current.label,
                 start_sec=current.start_sec,
                 end_sec=seg.end_sec,
                 confidence=avg_conf,
-                source=current.source,
+                source=merged_source,
             )
         else:
             result.append(current)
