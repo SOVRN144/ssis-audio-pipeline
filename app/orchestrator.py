@@ -530,11 +530,10 @@ def _execute_segments_stage(session: Session, job: PipelineJob, asset_id: str) -
     Returns:
         Dict with execution result.
     """
-    from app.config import DATA_DIR
     from services.worker_segments.run import run_segments_worker
 
     # Run the segments worker
-    result = run_segments_worker(asset_id, DATA_DIR)
+    result = run_segments_worker(asset_id)
 
     if result.ok:
         # Success - record artifact and update job

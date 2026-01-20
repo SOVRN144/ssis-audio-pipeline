@@ -674,23 +674,18 @@ def _run_segmenter(wav_path: Path) -> list[tuple[str, float, float]]:
     return result
 
 
-def run_segments_worker(
-    asset_id: str,
-    data_dir: Path | str,
-) -> SegmentsResult:
+def run_segments_worker(asset_id: str) -> SegmentsResult:
     """Run the segments worker for an asset.
 
     This is the main entry point for the segments worker.
 
     Args:
         asset_id: The asset ID to process.
-        data_dir: Base data directory (contains audio/, segments/).
 
     Returns:
         SegmentsResult with success/failure status and metrics.
     """
     start_time = time.monotonic()
-    data_dir = Path(data_dir)
 
     # Get paths
     input_path = audio_normalized_path(asset_id)
@@ -870,9 +865,7 @@ if __name__ == "__main__":
         print(f"Usage: {sys.argv[0]} <asset_id>")
         sys.exit(1)
 
-    from app.config import DATA_DIR
-
-    result = run_segments_worker(sys.argv[1], DATA_DIR)
+    result = run_segments_worker(sys.argv[1])
     if result.ok:
         print(f"Success: {result.artifact_path}")
         print(f"Metrics: {result.metrics}")

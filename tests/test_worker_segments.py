@@ -116,7 +116,7 @@ class TestContractFieldsPresent:
             "services.worker_segments.run._run_segmenter",
             return_value=mock_segments,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert result.ok
         assert result.artifact_path is not None
@@ -256,7 +256,7 @@ class TestSchemaValidationGate:
             "services.worker_segments.run._run_segmenter",
             return_value=mock_segments,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         # With clamping, invalid segments are dropped gracefully
         # The entire duration becomes derived silence
@@ -504,7 +504,7 @@ class TestAtomicPublishBoundary:
             "services.worker_segments.run._run_segmenter",
             return_value=mock_segments,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert result.ok
 
@@ -552,7 +552,7 @@ class TestAtomicPublishBoundary:
             "services.worker_segments.run._run_segmenter",
             side_effect=track_segmenter,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert result.ok
         assert not segmenter_called[0]
@@ -583,7 +583,7 @@ class TestErrorMapping:
             "services.worker_segments.run._run_segmenter",
             side_effect=raise_memory_error,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert not result.ok
         assert result.error_code == SegmentsErrorCode.MODEL_OOM.value
@@ -606,7 +606,7 @@ class TestErrorMapping:
             "services.worker_segments.run._run_segmenter",
             side_effect=raise_error,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert not result.ok
         assert result.error_code == SegmentsErrorCode.SEGMENTATION_FAILED.value
@@ -621,7 +621,7 @@ class TestErrorMapping:
         monkeypatch.setattr("app.utils.paths.SEGMENTS_DIR", segments_dir)
         monkeypatch.setattr("app.config.SEGMENTS_DIR", segments_dir)
 
-        result = run_segments_worker(asset_id, data_dir)
+        result = run_segments_worker(asset_id)
 
         assert not result.ok
         assert result.error_code == SegmentsErrorCode.INPUT_NOT_FOUND.value
@@ -644,7 +644,7 @@ class TestErrorMapping:
             "services.worker_segments.run._run_segmenter",
             side_effect=raise_oom_like,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert not result.ok
         assert result.error_code == SegmentsErrorCode.MODEL_OOM.value
@@ -910,6 +910,11 @@ class TestSegmentSourceLabels:
         assert filled[0].label == "silence"
         assert filled[0].source == SEGMENT_SOURCE_DERIVED
 
+    def test_very_short_audio_returns_empty_segments(self):
+        """Audio < MIN_SILENCE_SEC should return empty segments."""
+        segments = _fill_silence_gaps([], total_duration=0.3)
+        assert segments == []
+
 
 # --- Test: Schema Allows Source Field ---
 
@@ -1035,7 +1040,7 @@ class TestClampingAndBounds:
             "services.worker_segments.run._run_segmenter",
             return_value=mock_segments,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert result.ok
 
@@ -1143,7 +1148,7 @@ class TestConfidenceAdjustments:
             "services.worker_segments.run._run_segmenter",
             return_value=mock_segments,
         ):
-            result = run_segments_worker(asset_id, data_dir)
+            result = run_segments_worker(asset_id)
 
         assert result.ok
 
