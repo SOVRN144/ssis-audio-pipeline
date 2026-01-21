@@ -17,8 +17,10 @@ from app.models import ArtifactIndex, AudioAsset, PipelineJob, StageLock
 from app.orchestrator import (
     ARTIFACT_TYPE_FEATURES_H5,
     ARTIFACT_TYPE_NORMALIZED_WAV,
+    ARTIFACT_TYPE_SEGMENTS_V1,
     STAGE_DECODE,
     STAGE_FEATURES,
+    STAGE_SEGMENTS,
     _orchestrator_tick_impl,
 )
 from app.utils.hashing import feature_spec_alias as compute_feature_spec_alias
@@ -578,7 +580,12 @@ class TestFeaturesLockAliasConsistency:
             session.close()
 
     def test_features_artifact_skip_with_alias(self, asset_with_decode_complete):
-        """Should skip STAGE_FEATURES if artifact with matching alias exists."""
+        """Should skip STAGE_FEATURES if artifact with matching alias exists.
+
+        Note: With STAGE_SEGMENTS now in the pipeline, this test verifies that
+        STAGE_FEATURES is skipped (no features lock created) and STAGE_SEGMENTS
+        is dispatched next.
+        """
         asset_id, SessionFactory = asset_with_decode_complete
         expected_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
 
@@ -597,11 +604,11 @@ class TestFeaturesLockAliasConsistency:
 
             result = _orchestrator_tick_impl(session, asset_id)
 
-            # All stages complete - no work
-            assert result["status"] == "no_work"
-            assert result["reason"] == "all_stages_complete"
+            # STAGE_FEATURES is skipped, STAGE_SEGMENTS is dispatched
+            assert result["status"] == "dispatched"
+            assert result["stage"] == STAGE_SEGMENTS
 
-            # Verify no lock created
+            # Verify no features lock created (features was skipped)
             stmt = (
                 select(func.count())
                 .select_from(StageLock)
@@ -612,5 +619,53 @@ class TestFeaturesLockAliasConsistency:
             )
             count = session.execute(stmt).scalar()
             assert count == 0
+
+            # Verify segments lock was created
+            stmt = (
+                select(func.count())
+                .select_from(StageLock)
+                .where(
+                    StageLock.asset_id == asset_id,
+                    StageLock.stage == STAGE_SEGMENTS,
+                )
+            )
+            count = session.execute(stmt).scalar()
+            assert count == 1
+        finally:
+            session.close()
+
+    def test_all_stages_complete_returns_no_work(self, asset_with_decode_complete):
+        """Should return no_work when all stages including segments are complete."""
+        asset_id, SessionFactory = asset_with_decode_complete
+        expected_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+        session = SessionFactory()
+        try:
+            # Pre-create features artifact
+            features_artifact = ArtifactIndex(
+                asset_id=asset_id,
+                artifact_type=ARTIFACT_TYPE_FEATURES_H5,
+                artifact_path=f"/data/features/{asset_id}.{expected_alias}.h5",
+                feature_spec_alias=expected_alias,
+                schema_version="1.0.0",
+            )
+            session.add(features_artifact)
+
+            # Pre-create segments artifact
+            segments_artifact = ArtifactIndex(
+                asset_id=asset_id,
+                artifact_type=ARTIFACT_TYPE_SEGMENTS_V1,
+                artifact_path=f"/data/segments/{asset_id}.segments.v1.json",
+                feature_spec_alias=None,
+                schema_version="1.0.0",
+            )
+            session.add(segments_artifact)
+            session.commit()
+
+            result = _orchestrator_tick_impl(session, asset_id)
+
+            # All stages complete - no work
+            assert result["status"] == "no_work"
+            assert result["reason"] == "all_stages_complete"
         finally:
             session.close()

@@ -45,7 +45,7 @@ from app.config import (
 from app.db import create_stage_lock, init_db
 from app.models import ArtifactIndex, PipelineJob, StageLock, utc_now
 from app.utils.hashing import feature_spec_alias as compute_feature_spec_alias
-from app.utils.paths import audio_normalized_path, features_h5_path
+from app.utils.paths import audio_normalized_path, features_h5_path, segments_json_path
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -61,11 +61,21 @@ STAGE_DECODE = "decode"
 # Stage that follows decode (Step 5 scope)
 STAGE_FEATURES = "features"
 
+# Stage that follows features (Step 6 scope)
+STAGE_SEGMENTS = "segments"
+
 # Artifact type for decode stage output
 ARTIFACT_TYPE_NORMALIZED_WAV = "normalized_wav"
 
 # Artifact type for features stage output
 ARTIFACT_TYPE_FEATURES_H5 = "feature_pack"
+
+# Artifact type for segments stage output (Step 6)
+ARTIFACT_TYPE_SEGMENTS_V1 = "segments_v1"
+
+# Schema identifiers for segments (Step 6)
+SEGMENTS_SCHEMA_ID = "segments.v1"
+SEGMENTS_VERSION = "1.0.0"
 
 # Maximum lock reclaim events to store in metrics_json (prevent unbounded growth)
 MAX_LOCK_RECLAIM_EVENTS = 10
@@ -344,6 +354,9 @@ def _execute_stage_impl(session: Session, job_id: str, asset_id: str, stage: str
     if stage == STAGE_FEATURES:
         return _execute_features_stage(session, job, asset_id)
 
+    if stage == STAGE_SEGMENTS:
+        return _execute_segments_stage(session, job, asset_id)
+
     # Unknown stage
     logger.error("Unknown stage: %s", stage)
     _handle_stage_failure(session, job.job_id, "UNKNOWN_STAGE", f"Unknown stage: {stage}")
@@ -501,6 +514,75 @@ def _execute_features_stage(session: Session, job: PipelineJob, asset_id: str) -
             "status": "failed",
             "job_id": job.job_id,
             "stage": STAGE_FEATURES,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
+
+
+def _execute_segments_stage(session: Session, job: PipelineJob, asset_id: str) -> dict:
+    """Execute the segments stage using the segments worker.
+
+    Args:
+        session: Database session.
+        job: The PipelineJob record.
+        asset_id: The asset ID.
+
+    Returns:
+        Dict with execution result.
+    """
+    from services.worker_segments.run import run_segments_worker
+
+    # Run the segments worker
+    result = run_segments_worker(asset_id)
+
+    if result.ok:
+        # Success - record artifact and update job
+        if result.artifact_path and result.artifact_type:
+            _record_artifact(
+                session,
+                asset_id,
+                result.artifact_type,
+                result.artifact_path,
+                schema_version=result.schema_version or SEGMENTS_VERSION,
+            )
+
+        # Update job metrics
+        _update_job_metrics(
+            session,
+            job,
+            "segments",
+            result.metrics,
+        )
+
+        _mark_job_completed(session, job)
+        # Release lock with feature_spec_alias=None for segments stage
+        _release_stage_lock(session, asset_id, STAGE_SEGMENTS, None)
+
+        return {
+            "status": "completed",
+            "job_id": job.job_id,
+            "stage": STAGE_SEGMENTS,
+            "artifact_path": result.artifact_path,
+            "metrics": result.metrics,
+        }
+    else:
+        # Failure - trigger retry logic
+        error_code = result.error_code or "WORKER_ERROR"
+        error_message = result.message or "Segmentation failed"
+
+        logger.warning(
+            "Segments failed for asset_id=%s: %s - %s",
+            asset_id,
+            error_code,
+            error_message,
+        )
+
+        _handle_stage_failure(session, job.job_id, error_code, error_message)
+
+        return {
+            "status": "failed",
+            "job_id": job.job_id,
+            "stage": STAGE_SEGMENTS,
             "error_code": error_code,
             "error_message": error_message,
         }
@@ -843,6 +925,23 @@ def _artifact_exists(
         )
         return session.execute(stmt).scalar_one_or_none() is not None
 
+    if stage == STAGE_SEGMENTS:
+        # For segments stage, check for segments JSON file (not .tmp)
+        artifact_path = segments_json_path(asset_id)
+
+        # Check filesystem first (authoritative)
+        if artifact_path.exists():
+            return True
+
+        # Check artifact_index
+        stmt = select(ArtifactIndex).where(
+            and_(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == ARTIFACT_TYPE_SEGMENTS_V1,
+            )
+        )
+        return session.execute(stmt).scalar_one_or_none() is not None
+
     # Unknown stage - assume no artifact
     return False
 
@@ -995,7 +1094,7 @@ def _get_or_create_stage_job(
 def _determine_next_stage(session: Session, asset_id: str) -> str | None:
     """Determine the next stage to process for an asset.
 
-    Stage progression: ingest -> decode -> features
+    Stage progression: ingest -> decode -> features -> segments
 
     Args:
         session: Database session.
@@ -1052,6 +1151,29 @@ def _determine_next_stage(session: Session, asset_id: str) -> str | None:
 
         # pending/failed/running - orchestrator will handle
         return STAGE_FEATURES
+
+    # Features complete - check if segments is needed (Step 6)
+    if not _artifact_exists(session, asset_id, STAGE_SEGMENTS):
+        # Check for running/pending job
+        stmt = select(PipelineJob).where(
+            and_(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == STAGE_SEGMENTS,
+            )
+        )
+        existing_job = session.execute(stmt).scalar_one_or_none()
+
+        if existing_job is None:
+            return STAGE_SEGMENTS
+
+        if existing_job.status == "completed":
+            return None
+
+        if existing_job.status == "dead_letter":
+            return None  # Don't retry dead-letter
+
+        # pending/failed/running - orchestrator will handle
+        return STAGE_SEGMENTS
 
     # All stages complete
     return None

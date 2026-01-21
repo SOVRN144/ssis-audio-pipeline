@@ -45,6 +45,7 @@ class TestSegmentsInvariants:
             "version": "1.0.0",
             "asset_id": "test-asset-001",
             "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": "heuristic_v1",
             "segments": [
                 {"label": "speech", "start_sec": 0.0, "end_sec": 10.0},
                 {"label": "music", "start_sec": 10.0, "end_sec": 20.0},
@@ -75,6 +76,7 @@ class TestSegmentsInvariants:
             "version": "1.0.0",
             "asset_id": "test-asset-001",
             "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": "heuristic_v1",
             "segments": [
                 {"label": "speech", "start_sec": 10.0, "end_sec": 5.0},  # Invalid!
             ],
@@ -99,6 +101,7 @@ class TestSegmentsInvariants:
             "version": "1.0.0",
             "asset_id": "test-asset-001",
             "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": "heuristic_v1",
             "segments": [],
             "class_distribution": {
                 "speech": 10.5,
@@ -115,6 +118,7 @@ class TestSegmentsInvariants:
             "version": "1.0.0",
             "asset_id": "test-asset-001",
             "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": "heuristic_v1",
             "segments": [],
             "class_distribution": {
                 "speech": 10.5,
