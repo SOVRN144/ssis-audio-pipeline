@@ -563,11 +563,15 @@ def _basic_schema_validation(data: dict) -> tuple[bool, str | None]:
         return False, "segments must be a list"
 
     for i, seg in enumerate(data["segments"]):
-        for key in ["label", "start_sec", "end_sec"]:
+        for key in ["label", "start_sec", "end_sec", "confidence", "source"]:
             if key not in seg:
                 return False, f"Segment {i} missing required field: {key}"
         if seg["label"] not in CANONICAL_LABELS:
             return False, f"Segment {i} has invalid label: {seg['label']}"
+        if not isinstance(seg["confidence"], (int, float)):
+            return False, f"Segment {i} has non-numeric confidence"
+        if seg["source"] not in {SEGMENT_SOURCE, SEGMENT_SOURCE_DERIVED}:
+            return False, f"Segment {i} has invalid source: {seg['source']}"
 
     return True, None
 

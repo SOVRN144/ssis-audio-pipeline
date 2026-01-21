@@ -33,6 +33,7 @@ from services.worker_segments.run import (  # noqa: E402
     SegmentData,
     SegmentsErrorCode,
     _adjust_confidence,
+    _basic_schema_validation,
     _clamp_segments,
     _compute_metrics,
     _fill_silence_gaps,
@@ -272,6 +273,130 @@ class TestSchemaValidationGate:
         assert len(data["segments"]) == 1
         assert data["segments"][0]["label"] == "silence"
         assert data["segments"][0]["source"] == "derived"
+
+
+# --- Test: Fallback Schema Validation ---
+
+
+class TestFallbackSchemaValidation:
+    """Tests for _basic_schema_validation() fallback when jsonschema unavailable."""
+
+    def test_missing_confidence_fails(self):
+        """Test that segment missing confidence fails fallback validation."""
+        data = {
+            "schema_id": SEGMENTS_SCHEMA_ID,
+            "version": "1.0.0",
+            "asset_id": "test",
+            "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": CONFIDENCE_TYPE,
+            "segments": [
+                {
+                    "label": "speech",
+                    "start_sec": 0.0,
+                    "end_sec": 1.0,
+                    "source": SEGMENT_SOURCE,
+                    # missing confidence
+                }
+            ],
+        }
+        ok, error_msg = _basic_schema_validation(data)
+        assert not ok
+        assert "Segment 0 missing required field: confidence" in error_msg
+
+    def test_missing_source_fails(self):
+        """Test that segment missing source fails fallback validation."""
+        data = {
+            "schema_id": SEGMENTS_SCHEMA_ID,
+            "version": "1.0.0",
+            "asset_id": "test",
+            "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": CONFIDENCE_TYPE,
+            "segments": [
+                {
+                    "label": "speech",
+                    "start_sec": 0.0,
+                    "end_sec": 1.0,
+                    "confidence": 0.8,
+                    # missing source
+                }
+            ],
+        }
+        ok, error_msg = _basic_schema_validation(data)
+        assert not ok
+        assert "Segment 0 missing required field: source" in error_msg
+
+    def test_invalid_source_fails(self):
+        """Test that invalid source value fails fallback validation."""
+        data = {
+            "schema_id": SEGMENTS_SCHEMA_ID,
+            "version": "1.0.0",
+            "asset_id": "test",
+            "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": CONFIDENCE_TYPE,
+            "segments": [
+                {
+                    "label": "speech",
+                    "start_sec": 0.0,
+                    "end_sec": 1.0,
+                    "confidence": 0.8,
+                    "source": "invalid_source",
+                }
+            ],
+        }
+        ok, error_msg = _basic_schema_validation(data)
+        assert not ok
+        assert "Segment 0 has invalid source: invalid_source" in error_msg
+
+    def test_non_numeric_confidence_fails(self):
+        """Test that non-numeric confidence fails fallback validation."""
+        data = {
+            "schema_id": SEGMENTS_SCHEMA_ID,
+            "version": "1.0.0",
+            "asset_id": "test",
+            "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": CONFIDENCE_TYPE,
+            "segments": [
+                {
+                    "label": "speech",
+                    "start_sec": 0.0,
+                    "end_sec": 1.0,
+                    "confidence": "high",  # string instead of number
+                    "source": SEGMENT_SOURCE,
+                }
+            ],
+        }
+        ok, error_msg = _basic_schema_validation(data)
+        assert not ok
+        assert "Segment 0 has non-numeric confidence" in error_msg
+
+    def test_valid_segment_passes(self):
+        """Test that valid segment passes fallback validation."""
+        data = {
+            "schema_id": SEGMENTS_SCHEMA_ID,
+            "version": "1.0.0",
+            "asset_id": "test",
+            "computed_at": "2024-01-01T00:00:00Z",
+            "confidence_type": CONFIDENCE_TYPE,
+            "segments": [
+                {
+                    "label": "speech",
+                    "start_sec": 0.0,
+                    "end_sec": 1.0,
+                    "confidence": 0.8,
+                    "source": SEGMENT_SOURCE,
+                },
+                {
+                    "label": "silence",
+                    "start_sec": 1.0,
+                    "end_sec": 2.0,
+                    "confidence": 0.7,
+                    "source": SEGMENT_SOURCE_DERIVED,
+                },
+            ],
+        }
+        ok, error_msg = _basic_schema_validation(data)
+        assert ok
+        assert error_msg is None
 
 
 # --- Test D: Threshold Post-Processing ---
