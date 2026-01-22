@@ -134,15 +134,24 @@ def _get_feature_spec_alias() -> str:
     """Get the active feature spec alias.
 
     Selection rule (LOCKED):
-    1. Check SSIS_ACTIVE_FEATURE_SPEC_ALIAS env var first
-    2. If not set, derive from DEFAULT_FEATURE_SPEC_ID
+    1. Check SSIS_ACTIVE_FEATURE_SPEC_ALIAS env var first (must be valid 12-char hex)
+    2. If not set or invalid, derive from DEFAULT_FEATURE_SPEC_ID
 
     Returns:
         12-character hex feature spec alias.
     """
     env_alias = os.environ.get(FEATURE_SPEC_ALIAS_ENV)
     if env_alias:
-        return env_alias
+        alias = env_alias.strip().lower()
+        # Validate: must be exactly 12 hex characters
+        if len(alias) != 12 or any(c not in "0123456789abcdef" for c in alias):
+            logger.warning(
+                "Invalid %s value '%s', falling back to default",
+                FEATURE_SPEC_ALIAS_ENV,
+                env_alias,
+            )
+            return compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        return alias
     return compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
 
 
@@ -174,11 +183,15 @@ def _load_segments(segments_path: Path) -> list[dict]:
         segments_path: Path to segments JSON file.
 
     Returns:
-        List of segment dictionaries.
+        List of segment dictionaries (empty if missing key).
     """
     with open(segments_path) as f:
         data = json.load(f)
-    return data.get("segments", [])
+    segments = data.get("segments")
+    if segments is None:
+        logger.warning("No 'segments' key in %s, using empty list", segments_path)
+        return []
+    return segments
 
 
 def _load_features(h5_path: Path) -> tuple[np.ndarray, np.ndarray, float, float]:
@@ -344,11 +357,11 @@ def _generate_candidates(
     seen_windows = set()
 
     for start in boundaries:
-        # Compute window end
-        end = min(start + WINDOW_SEC, total_duration)
-
-        # Clamp start to [0, total_duration]
+        # Clamp start to [0, total_duration] first
         start = max(0.0, min(start, total_duration))
+
+        # Compute window end based on clamped start
+        end = min(start + WINDOW_SEC, total_duration)
 
         # Skip if window too short
         duration = end - start
@@ -509,8 +522,13 @@ def _load_schema() -> dict:
 
     Returns:
         Parsed JSON schema dict.
+
+    Raises:
+        FileNotFoundError: If schema file does not exist.
     """
     schema_path = Path(__file__).parent.parent.parent / "specs" / "preview_candidate.schema.json"
+    if not schema_path.exists():
+        raise FileNotFoundError(f"Preview schema not found at {schema_path}")
     with open(schema_path) as f:
         return json.load(f)
 
@@ -642,19 +660,39 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
 
     # --- Idempotency: Check if output already exists ---
     if output_path.exists():
-        logger.info("Preview already exists for asset_id=%s", asset_id)
-        return PreviewResult(
-            ok=True,
-            message="Artifact already exists",
-            artifact_path=str(output_path),
-            artifact_type=ARTIFACT_TYPE_PREVIEW_V1,
-            schema_version=PREVIEW_VERSION,
-            metrics={
-                "schema_id": PREVIEW_SCHEMA_ID,
-                "version": PREVIEW_VERSION,
-                "spec_alias_used": spec_alias,
-            },
-        )
+        # Validate integrity before returning cached result
+        try:
+            with open(output_path) as f:
+                existing = json.load(f)
+            # Check asset_id and schema_id match
+            if (
+                existing.get("asset_id") != asset_id
+                or existing.get("schema_id") != PREVIEW_SCHEMA_ID
+            ):
+                logger.warning(
+                    "Existing preview for asset_id=%s has mismatched metadata, regenerating",
+                    asset_id,
+                )
+            else:
+                logger.info("Preview already exists for asset_id=%s", asset_id)
+                return PreviewResult(
+                    ok=True,
+                    message="Artifact already exists",
+                    artifact_path=str(output_path),
+                    artifact_type=ARTIFACT_TYPE_PREVIEW_V1,
+                    schema_version=PREVIEW_VERSION,
+                    metrics={
+                        "schema_id": PREVIEW_SCHEMA_ID,
+                        "version": PREVIEW_VERSION,
+                        "spec_alias_used": spec_alias,
+                    },
+                )
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "Existing preview for asset_id=%s is corrupt (%s), regenerating",
+                asset_id,
+                e,
+            )
 
     # --- Input validation: segments ---
     if not segments_path.exists():
@@ -793,10 +831,15 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
 
     # Ensure minimum window duration even in fallback
     if end_sec - start_sec < MIN_WINDOW_SEC:
-        # Try to extend window if possible
+        # Try to extend window while preserving intro start if possible
         if total_duration >= MIN_WINDOW_SEC:
-            start_sec = 0.0
-            end_sec = min(WINDOW_SEC, total_duration)
+            if start_sec + MIN_WINDOW_SEC <= total_duration:
+                # Can extend from current start_sec
+                end_sec = min(start_sec + WINDOW_SEC, total_duration)
+            else:
+                # Must reset to beginning to fit minimum window
+                start_sec = 0.0
+                end_sec = min(WINDOW_SEC, total_duration)
         else:
             # Audio is shorter than minimum window, use full audio
             start_sec = 0.0
