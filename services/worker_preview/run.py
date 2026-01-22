@@ -301,14 +301,17 @@ def _find_segment_boundaries(segments: list[dict]) -> list[float]:
     Returns:
         List of boundary times in seconds (deduplicated).
     """
-    boundaries = set()
+    boundaries: set[float] = set()
     for seg in segments:
-        start = seg.get("start_sec", 0)
-        end = seg.get("end_sec", 0)
-        if start > 0:
-            boundaries.add(start)
-        if end > 0:
-            boundaries.add(end)
+        for field_name in ("start_sec", "end_sec"):
+            value = seg.get(field_name)
+            if value is None:
+                continue
+            if not isinstance(value, (int, float)):
+                logger.warning("Invalid %s in segment: %r", field_name, value)
+                continue
+            if value > 0:
+                boundaries.add(float(value))
     return sorted(boundaries)
 
 

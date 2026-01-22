@@ -280,6 +280,17 @@ class TestCandidateBoundaries:
         assert 60.0 in boundaries
         assert 90.0 in boundaries
 
+    def test_find_segment_boundaries_ignores_non_numeric_values(self):
+        """Ensure malformed boundaries are ignored safely."""
+        segments = [
+            {"start_sec": "1.0", "end_sec": 2.0},
+            {"start_sec": None, "end_sec": -1},
+            {"start_sec": 0.5, "end_sec": "bad"},
+        ]
+
+        boundaries = _find_segment_boundaries(segments)
+        assert boundaries == [0.5, 2.0]
+
     def test_boundary_merge_deduplication(self):
         """Test that boundaries are merged and deduplicated."""
         pause_boundaries = [10.0, 20.0, 30.0]
