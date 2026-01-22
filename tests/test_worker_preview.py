@@ -32,6 +32,7 @@ from services.worker_preview.run import (
     PreviewCandidate,
     PreviewErrorCode,
     _basic_schema_validation,
+    _ensure_min_window,
     _find_intro_start,
     _find_pause_boundaries,
     _find_segment_boundaries,
@@ -836,6 +837,31 @@ class TestSegmentsJsonValidation:
 class TestIdempotencyIntegrity:
     """Tests for idempotency check with integrity validation."""
 
+    def _prepare_valid_preview(self, temp_data_dir, monkeypatch, asset_id: str):
+        tmpdir, data_dir, audio_dir, features_dir, segments_dir, preview_dir = temp_data_dir
+
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.SEGMENTS_DIR", segments_dir)
+        monkeypatch.setattr("app.utils.paths.PREVIEW_DIR", preview_dir)
+        monkeypatch.setattr("app.config.PREVIEW_DIR", preview_dir)
+
+        wav_path = audio_dir / asset_id / "normalized.wav"
+        _create_test_wav(wav_path, duration_sec=120.0)
+
+        segments_path = segments_dir / f"{asset_id}.segments.v1.json"
+        _create_test_segments(segments_path)
+
+        spec_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        features_path = features_dir / f"{asset_id}.{spec_alias}.h5"
+        _create_test_h5(features_path, duration_sec=120.0)
+
+        result = run_preview_worker(asset_id)
+        assert result.ok
+
+        output_path = preview_dir / f"{asset_id}.preview.v1.json"
+        return output_path, segments_path, features_path
+
     def test_corrupt_existing_preview_triggers_regeneration(self, temp_data_dir, monkeypatch):
         """Test that corrupt existing preview file triggers regeneration."""
         tmpdir, data_dir, audio_dir, features_dir, segments_dir, preview_dir = temp_data_dir
@@ -920,6 +946,84 @@ class TestIdempotencyIntegrity:
             data = json.load(f)
         assert data["asset_id"] == asset_id
 
+    def test_cached_preview_wrong_version_regenerates(self, temp_data_dir, monkeypatch):
+        """Preview with wrong version should be regenerated."""
+        asset_id = "test-wrong-version"
+        output_path, _, _ = self._prepare_valid_preview(temp_data_dir, monkeypatch, asset_id)
+
+        with open(output_path) as f:
+            data = json.load(f)
+        original_computed_at = data["computed_at"]
+        data["version"] = "0.9.0"
+        with open(output_path, "w") as f:
+            json.dump(data, f)
+
+        result = run_preview_worker(asset_id)
+        assert result.ok
+        assert result.message == "Preview computed successfully"
+
+        with open(output_path) as f:
+            regenerated = json.load(f)
+        assert regenerated["version"] == PREVIEW_VERSION
+        assert regenerated["computed_at"] != original_computed_at
+
+    def test_cached_preview_invariants_failure_regenerates(self, temp_data_dir, monkeypatch):
+        """Preview violating invariants should trigger regeneration."""
+        asset_id = "test-invariants-fail"
+        output_path, _, _ = self._prepare_valid_preview(temp_data_dir, monkeypatch, asset_id)
+
+        with open(output_path) as f:
+            data = json.load(f)
+        original_computed_at = data["computed_at"]
+        data["start_sec"] = 100.0
+        data["end_sec"] = 50.0
+        data["duration_sec"] = -50.0
+        with open(output_path, "w") as f:
+            json.dump(data, f)
+
+        result = run_preview_worker(asset_id)
+        assert result.ok
+        assert result.message == "Preview computed successfully"
+
+        with open(output_path) as f:
+            regenerated = json.load(f)
+        assert regenerated["end_sec"] >= regenerated["start_sec"]
+        assert regenerated["computed_at"] != original_computed_at
+
+    def test_cached_preview_schema_failure_regenerates(self, temp_data_dir, monkeypatch):
+        """Preview failing schema validation should trigger regeneration."""
+        asset_id = "test-schema-fail"
+        output_path, _, _ = self._prepare_valid_preview(temp_data_dir, monkeypatch, asset_id)
+
+        with open(output_path) as f:
+            data = json.load(f)
+        original_computed_at = data["computed_at"]
+        data.pop("mode", None)  # Remove required field
+        with open(output_path, "w") as f:
+            json.dump(data, f)
+
+        result = run_preview_worker(asset_id)
+        assert result.ok
+        assert result.message == "Preview computed successfully"
+
+        with open(output_path) as f:
+            regenerated = json.load(f)
+        assert regenerated["mode"] in {"smart", "intro", "fallback"}
+        assert regenerated["computed_at"] != original_computed_at
+
+    def test_cached_preview_valid_returns_early(self, temp_data_dir, monkeypatch):
+        """Valid cached preview should short-circuit even if inputs missing."""
+        asset_id = "test-valid-cache"
+        output_path, segments_path, _ = self._prepare_valid_preview(
+            temp_data_dir, monkeypatch, asset_id
+        )
+
+        segments_path.unlink()
+
+        result = run_preview_worker(asset_id)
+        assert result.ok
+        assert result.message == "Artifact already exists"
+
 
 # --- Test: Intro Window Extension ---
 
@@ -944,19 +1048,7 @@ class TestIntroWindowExtension:
         end_sec = 35.0  # Only 5 sec, less than MIN_WINDOW_SEC (45)
         total_duration = 120.0
 
-        # Apply the fixed logic
-        if end_sec - start_sec < MIN_WINDOW_SEC:
-            if total_duration >= MIN_WINDOW_SEC:
-                if start_sec + MIN_WINDOW_SEC <= total_duration:
-                    # Can extend from current start_sec
-                    end_sec = min(start_sec + WINDOW_SEC, total_duration)
-                else:
-                    # Must reset to beginning
-                    start_sec = 0.0
-                    end_sec = min(WINDOW_SEC, total_duration)
-            else:
-                start_sec = 0.0
-                end_sec = total_duration
+        start_sec, end_sec = _ensure_min_window(start_sec, end_sec, total_duration)
 
         # start_sec should be preserved at 30.0
         assert start_sec == 30.0
@@ -973,17 +1065,7 @@ class TestIntroWindowExtension:
         end_sec = 105.0  # Only 5 sec
         total_duration = 120.0
 
-        # Apply the fixed logic
-        if end_sec - start_sec < MIN_WINDOW_SEC:
-            if total_duration >= MIN_WINDOW_SEC:
-                if start_sec + MIN_WINDOW_SEC <= total_duration:
-                    end_sec = min(start_sec + WINDOW_SEC, total_duration)
-                else:
-                    start_sec = 0.0
-                    end_sec = min(WINDOW_SEC, total_duration)
-            else:
-                start_sec = 0.0
-                end_sec = total_duration
+        start_sec, end_sec = _ensure_min_window(start_sec, end_sec, total_duration)
 
         # start_sec should be reset to 0.0
         assert start_sec == 0.0

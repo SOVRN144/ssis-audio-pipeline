@@ -530,6 +530,25 @@ def _find_intro_start(
     return 0.0
 
 
+def _ensure_min_window(
+    start_sec: float,
+    end_sec: float,
+    total_duration: float,
+) -> tuple[float, float]:
+    """Ensure the preview window meets MIN_WINDOW_SEC by extending or clamping."""
+    if end_sec - start_sec < MIN_WINDOW_SEC:
+        if total_duration >= MIN_WINDOW_SEC:
+            if start_sec + MIN_WINDOW_SEC <= total_duration:
+                end_sec = min(start_sec + WINDOW_SEC, total_duration)
+            else:
+                start_sec = 0.0
+                end_sec = min(WINDOW_SEC, total_duration)
+        else:
+            start_sec = 0.0
+            end_sec = total_duration
+    return start_sec, end_sec
+
+
 # --- Schema Validation ---
 
 
@@ -689,29 +708,46 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
         try:
             with open(output_path) as f:
                 existing = json.load(f)
-            # Check asset_id and schema_id match
+            # Check metadata matches expected values
             if (
                 existing.get("asset_id") != asset_id
                 or existing.get("schema_id") != PREVIEW_SCHEMA_ID
+                or existing.get("version") != PREVIEW_VERSION
             ):
                 logger.warning(
                     "Existing preview for asset_id=%s has mismatched metadata, regenerating",
                     asset_id,
                 )
             else:
-                logger.info("Preview already exists for asset_id=%s", asset_id)
-                return PreviewResult(
-                    ok=True,
-                    message="Artifact already exists",
-                    artifact_path=str(output_path),
-                    artifact_type=ARTIFACT_TYPE_PREVIEW_V1,
-                    schema_version=PREVIEW_VERSION,
-                    metrics={
-                        "schema_id": PREVIEW_SCHEMA_ID,
-                        "version": PREVIEW_VERSION,
-                        "spec_alias_used": spec_alias,
-                    },
-                )
+                valid, error_msg = _validate_invariants(existing)
+                if not valid:
+                    logger.warning(
+                        "Existing preview for asset_id=%s failed invariants (%s), regenerating",
+                        asset_id,
+                        error_msg,
+                    )
+                else:
+                    schema_valid, schema_msg = _validate_schema(existing)
+                    if not schema_valid:
+                        logger.warning(
+                            "Existing preview for asset_id=%s failed schema (%s), regenerating",
+                            asset_id,
+                            schema_msg,
+                        )
+                    else:
+                        logger.info("Preview already exists for asset_id=%s", asset_id)
+                        return PreviewResult(
+                            ok=True,
+                            message="Artifact already exists",
+                            artifact_path=str(output_path),
+                            artifact_type=ARTIFACT_TYPE_PREVIEW_V1,
+                            schema_version=PREVIEW_VERSION,
+                            metrics={
+                                "schema_id": PREVIEW_SCHEMA_ID,
+                                "version": PREVIEW_VERSION,
+                                "spec_alias_used": spec_alias,
+                            },
+                        )
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(
                 "Existing preview for asset_id=%s is corrupt (%s), regenerating",
@@ -752,11 +788,12 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
             # Fallback: estimate from features
             logger.warning("WAV not found, estimating duration from features")
             with h5py.File(features_path, "r") as f:
-                melspec = f["melspec"][:]
+                melspec_ds = f["melspec"]
+                n_frames = melspec_ds.shape[0]
                 hop_length = f.attrs.get("hop_length", 220)
                 sample_rate = f.attrs.get("sample_rate", 22050)
             mel_hop_sec = hop_length / sample_rate
-            total_duration = len(melspec) * mel_hop_sec
+            total_duration = n_frames * mel_hop_sec
     except Exception as e:
         logger.error("Failed to get audio duration for asset_id=%s: %s", asset_id, e)
         return PreviewResult(
@@ -854,21 +891,7 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
         end_sec = min(intro_start + WINDOW_SEC, total_duration)
         reason = "No valid candidates generated"
 
-    # Ensure minimum window duration even in fallback
-    if end_sec - start_sec < MIN_WINDOW_SEC:
-        # Try to extend window while preserving intro start if possible
-        if total_duration >= MIN_WINDOW_SEC:
-            if start_sec + MIN_WINDOW_SEC <= total_duration:
-                # Can extend from current start_sec
-                end_sec = min(start_sec + WINDOW_SEC, total_duration)
-            else:
-                # Must reset to beginning to fit minimum window
-                start_sec = 0.0
-                end_sec = min(WINDOW_SEC, total_duration)
-        else:
-            # Audio is shorter than minimum window, use full audio
-            start_sec = 0.0
-            end_sec = total_duration
+    start_sec, end_sec = _ensure_min_window(start_sec, end_sec, total_duration)
 
     duration_sec = end_sec - start_sec
 
