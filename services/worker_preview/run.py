@@ -181,14 +181,14 @@ def _load_segments(segments_path: Path) -> list[dict]:
     return data.get("segments", [])
 
 
-def _load_features(h5_path: Path) -> tuple[np.ndarray, np.ndarray, float]:
+def _load_features(h5_path: Path) -> tuple[np.ndarray, np.ndarray, float, float]:
     """Load features from HDF5 file.
 
     Args:
         h5_path: Path to HDF5 feature file.
 
     Returns:
-        Tuple of (melspec, embeddings, hop_sec).
+        Tuple of (melspec, embeddings, mel_hop_sec, embed_hop_sec).
     """
     with h5py.File(h5_path, "r") as f:
         melspec = f["melspec"][:]
