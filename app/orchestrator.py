@@ -5,6 +5,9 @@ per Blueprint section 9.
 
 Stage progression: ingest -> decode -> features -> segments -> preview
 
+Step 7 scope:
+- Preview stage for computing optimal preview windows from features/segments
+
 Step 3 scope:
 - Planning based on artifact existence + artifact_index
 - StageLock acquisition with TTL and stale reclamation
@@ -45,7 +48,12 @@ from app.config import (
 from app.db import create_stage_lock, init_db
 from app.models import ArtifactIndex, PipelineJob, StageLock, utc_now
 from app.utils.hashing import feature_spec_alias as compute_feature_spec_alias
-from app.utils.paths import audio_normalized_path, features_h5_path, segments_json_path
+from app.utils.paths import (
+    audio_normalized_path,
+    features_h5_path,
+    preview_json_path,
+    segments_json_path,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -64,6 +72,9 @@ STAGE_FEATURES = "features"
 # Stage that follows features (Step 6 scope)
 STAGE_SEGMENTS = "segments"
 
+# Stage that follows segments (Step 7 scope)
+STAGE_PREVIEW = "preview"
+
 # Artifact type for decode stage output
 ARTIFACT_TYPE_NORMALIZED_WAV = "normalized_wav"
 
@@ -73,9 +84,16 @@ ARTIFACT_TYPE_FEATURES_H5 = "feature_pack"
 # Artifact type for segments stage output (Step 6)
 ARTIFACT_TYPE_SEGMENTS_V1 = "segments_v1"
 
+# Artifact type for preview stage output (Step 7)
+ARTIFACT_TYPE_PREVIEW_V1 = "preview_v1"
+
 # Schema identifiers for segments (Step 6)
 SEGMENTS_SCHEMA_ID = "segments.v1"
 SEGMENTS_VERSION = "1.0.0"
+
+# Schema identifiers for preview (Step 7)
+PREVIEW_SCHEMA_ID = "preview_candidate.v1"
+PREVIEW_VERSION = "1.0.0"
 
 # Maximum lock reclaim events to store in metrics_json (prevent unbounded growth)
 MAX_LOCK_RECLAIM_EVENTS = 10
@@ -357,6 +375,9 @@ def _execute_stage_impl(session: Session, job_id: str, asset_id: str, stage: str
     if stage == STAGE_SEGMENTS:
         return _execute_segments_stage(session, job, asset_id)
 
+    if stage == STAGE_PREVIEW:
+        return _execute_preview_stage(session, job, asset_id)
+
     # Unknown stage
     logger.error("Unknown stage: %s", stage)
     _handle_stage_failure(session, job.job_id, "UNKNOWN_STAGE", f"Unknown stage: {stage}")
@@ -583,6 +604,75 @@ def _execute_segments_stage(session: Session, job: PipelineJob, asset_id: str) -
             "status": "failed",
             "job_id": job.job_id,
             "stage": STAGE_SEGMENTS,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
+
+
+def _execute_preview_stage(session: Session, job: PipelineJob, asset_id: str) -> dict:
+    """Execute the preview stage using the preview worker.
+
+    Args:
+        session: Database session.
+        job: The PipelineJob record.
+        asset_id: The asset ID.
+
+    Returns:
+        Dict with execution result.
+    """
+    from services.worker_preview.run import run_preview_worker
+
+    # Run the preview worker
+    result = run_preview_worker(asset_id)
+
+    if result.ok:
+        # Success - record artifact and update job
+        if result.artifact_path and result.artifact_type:
+            _record_artifact(
+                session,
+                asset_id,
+                result.artifact_type,
+                result.artifact_path,
+                schema_version=result.schema_version or PREVIEW_VERSION,
+            )
+
+        # Update job metrics
+        _update_job_metrics(
+            session,
+            job,
+            "preview",
+            result.metrics,
+        )
+
+        _mark_job_completed(session, job)
+        # Release lock with feature_spec_alias=None for preview stage
+        _release_stage_lock(session, asset_id, STAGE_PREVIEW, None)
+
+        return {
+            "status": "completed",
+            "job_id": job.job_id,
+            "stage": STAGE_PREVIEW,
+            "artifact_path": result.artifact_path,
+            "metrics": result.metrics,
+        }
+    else:
+        # Failure - trigger retry logic
+        error_code = result.error_code or "WORKER_ERROR"
+        error_message = result.message or "Preview computation failed"
+
+        logger.warning(
+            "Preview failed for asset_id=%s: %s - %s",
+            asset_id,
+            error_code,
+            error_message,
+        )
+
+        _handle_stage_failure(session, job.job_id, error_code, error_message)
+
+        return {
+            "status": "failed",
+            "job_id": job.job_id,
+            "stage": STAGE_PREVIEW,
             "error_code": error_code,
             "error_message": error_message,
         }
@@ -942,6 +1032,23 @@ def _artifact_exists(
         )
         return session.execute(stmt).scalar_one_or_none() is not None
 
+    if stage == STAGE_PREVIEW:
+        # For preview stage, check for preview JSON file (not .tmp)
+        artifact_path = preview_json_path(asset_id)
+
+        # Check filesystem first (authoritative)
+        if artifact_path.exists():
+            return True
+
+        # Check artifact_index
+        stmt = select(ArtifactIndex).where(
+            and_(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == ARTIFACT_TYPE_PREVIEW_V1,
+            )
+        )
+        return session.execute(stmt).scalar_one_or_none() is not None
+
     # Unknown stage - assume no artifact
     return False
 
@@ -1094,7 +1201,7 @@ def _get_or_create_stage_job(
 def _determine_next_stage(session: Session, asset_id: str) -> str | None:
     """Determine the next stage to process for an asset.
 
-    Stage progression: ingest -> decode -> features -> segments
+    Stage progression: ingest -> decode -> features -> segments -> preview
 
     Args:
         session: Database session.
@@ -1174,6 +1281,29 @@ def _determine_next_stage(session: Session, asset_id: str) -> str | None:
 
         # pending/failed/running - orchestrator will handle
         return STAGE_SEGMENTS
+
+    # Segments complete - check if preview is needed (Step 7)
+    if not _artifact_exists(session, asset_id, STAGE_PREVIEW):
+        # Check for running/pending job
+        stmt = select(PipelineJob).where(
+            and_(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == STAGE_PREVIEW,
+            )
+        )
+        existing_job = session.execute(stmt).scalar_one_or_none()
+
+        if existing_job is None:
+            return STAGE_PREVIEW
+
+        if existing_job.status == "completed":
+            return None
+
+        if existing_job.status == "dead_letter":
+            return None  # Don't retry dead-letter
+
+        # pending/failed/running - orchestrator will handle
+        return STAGE_PREVIEW
 
     # All stages complete
     return None
