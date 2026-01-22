@@ -662,6 +662,8 @@ def _validate_invariants(data: dict) -> tuple[bool, str | None]:
     for field_name, value in numeric_fields.items():
         if value is None:
             continue
+        if not isinstance(value, (int, float)):
+            return False, f"{field_name} must be numeric"
         if math.isnan(value) or math.isinf(value):
             return False, f"{field_name} contains NaN/Inf"
 

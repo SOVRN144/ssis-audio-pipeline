@@ -1198,6 +1198,32 @@ class TestNaNInfInvariants:
         assert "best_score" in error_msg
         assert "NaN/Inf" in error_msg
 
+    def test_non_numeric_best_score_fails_validation(self):
+        """Test that string best_score fails invariants validation."""
+        data = {
+            "start_sec": 0.0,
+            "end_sec": 60.0,
+            "duration_sec": 60.0,
+            "best_score": "0.5",
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert not ok
+        assert "best_score" in error_msg
+        assert "numeric" in error_msg
+
+    def test_non_numeric_confidence_fails_validation(self):
+        """Test that string confidence fails invariants validation."""
+        data = {
+            "start_sec": 5.0,
+            "end_sec": 65.0,
+            "duration_sec": 60.0,
+            "confidence": "0.9",
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert not ok
+        assert "confidence" in error_msg
+        assert "numeric" in error_msg
+
     def test_none_confidence_passes_validation(self):
         """Test that None confidence passes (optional field)."""
         data = {
