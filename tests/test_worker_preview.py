@@ -978,3 +978,154 @@ class TestIntroWindowExtension:
         assert start_sec == 0.0
         # end_sec should be 60.0
         assert end_sec == 60.0
+
+
+# --- Test: Malformed Segments Handling ---
+
+
+class TestMalformedSegmentsHandling:
+    """Tests for graceful handling of malformed segments JSON."""
+
+    def test_segments_not_a_list_returns_empty(self, tmp_path):
+        """Test that non-list 'segments' value returns empty list."""
+        segments_path = tmp_path / "test.segments.v1.json"
+        # Write JSON with segments as string instead of list
+        with open(segments_path, "w") as f:
+            json.dump({"segments": "not-a-list"}, f)
+
+        result = _load_segments(segments_path)
+        assert result == []
+
+    def test_non_dict_segments_filtered(self, tmp_path):
+        """Test that non-dict entries in segments list are filtered."""
+        segments_path = tmp_path / "test.segments.v1.json"
+        # Write JSON with mixed valid and invalid entries
+        with open(segments_path, "w") as f:
+            json.dump(
+                {
+                    "segments": [
+                        1,  # invalid: int
+                        {"label": "speech", "start_sec": 0.0, "end_sec": 5.0},  # valid
+                        "x",  # invalid: string
+                        {"label": "music", "start_sec": 5.0, "end_sec": 10.0},  # valid
+                    ]
+                },
+                f,
+            )
+
+        result = _load_segments(segments_path)
+        # Should only have the 2 valid dict entries
+        assert len(result) == 2
+        assert result[0]["label"] == "speech"
+        assert result[1]["label"] == "music"
+
+
+# --- Test: Empty Melspec Handling ---
+
+
+class TestEmptyMelspecHandling:
+    """Tests for graceful handling of empty melspec."""
+
+    def test_empty_melspec_returns_empty_boundaries(self):
+        """Test that empty melspec returns empty pause boundaries."""
+        # Create empty melspec
+        melspec = np.array([]).reshape(0, 64)  # shape (0, n_mels)
+        mel_hop_sec = 0.01
+        total_duration = 10.0
+
+        boundaries = _find_pause_boundaries(melspec, mel_hop_sec, total_duration)
+        assert boundaries == []
+
+    def test_zero_size_melspec_returns_empty_boundaries(self):
+        """Test that zero-size melspec returns empty pause boundaries."""
+        # Create melspec with size 0
+        melspec = np.array([])
+        mel_hop_sec = 0.01
+        total_duration = 10.0
+
+        boundaries = _find_pause_boundaries(melspec, mel_hop_sec, total_duration)
+        assert boundaries == []
+
+
+# --- Test: NaN/Inf Invariants for confidence/best_score ---
+
+
+class TestNaNInfInvariants:
+    """Tests for NaN/Inf checking in confidence and best_score."""
+
+    def test_confidence_nan_fails_validation(self):
+        """Test that NaN confidence fails invariants validation."""
+        data = {
+            "start_sec": 0.0,
+            "end_sec": 60.0,
+            "duration_sec": 60.0,
+            "confidence": float("nan"),
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert not ok
+        assert "confidence" in error_msg
+        assert "NaN/Inf" in error_msg
+
+    def test_confidence_inf_fails_validation(self):
+        """Test that Inf confidence fails invariants validation."""
+        data = {
+            "start_sec": 0.0,
+            "end_sec": 60.0,
+            "duration_sec": 60.0,
+            "confidence": float("inf"),
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert not ok
+        assert "confidence" in error_msg
+        assert "NaN/Inf" in error_msg
+
+    def test_best_score_nan_fails_validation(self):
+        """Test that NaN best_score fails invariants validation."""
+        data = {
+            "start_sec": 0.0,
+            "end_sec": 60.0,
+            "duration_sec": 60.0,
+            "best_score": float("nan"),
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert not ok
+        assert "best_score" in error_msg
+        assert "NaN/Inf" in error_msg
+
+    def test_best_score_inf_fails_validation(self):
+        """Test that Inf best_score fails invariants validation."""
+        data = {
+            "start_sec": 0.0,
+            "end_sec": 60.0,
+            "duration_sec": 60.0,
+            "best_score": float("-inf"),
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert not ok
+        assert "best_score" in error_msg
+        assert "NaN/Inf" in error_msg
+
+    def test_none_confidence_passes_validation(self):
+        """Test that None confidence passes (optional field)."""
+        data = {
+            "start_sec": 0.0,
+            "end_sec": 60.0,
+            "duration_sec": 60.0,
+            "confidence": None,
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert ok
+        assert error_msg is None
+
+    def test_valid_numeric_fields_pass(self):
+        """Test that valid numeric fields pass invariants."""
+        data = {
+            "start_sec": 0.0,
+            "end_sec": 60.0,
+            "duration_sec": 60.0,
+            "confidence": 0.85,
+            "best_score": 0.72,
+        }
+        ok, error_msg = _validate_invariants(data)
+        assert ok
+        assert error_msg is None

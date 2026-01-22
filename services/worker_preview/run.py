@@ -183,7 +183,7 @@ def _load_segments(segments_path: Path) -> list[dict]:
         segments_path: Path to segments JSON file.
 
     Returns:
-        List of segment dictionaries (empty if missing key).
+        List of segment dictionaries (empty if missing/invalid).
     """
     with open(segments_path) as f:
         data = json.load(f)
@@ -191,7 +191,16 @@ def _load_segments(segments_path: Path) -> list[dict]:
     if segments is None:
         logger.warning("No 'segments' key in %s, using empty list", segments_path)
         return []
-    return segments
+    if not isinstance(segments, list):
+        logger.warning("Invalid 'segments' type in %s, using empty list", segments_path)
+        return []
+    # Filter to dict entries only
+    valid = [s for s in segments if isinstance(s, dict)]
+    if len(valid) != len(segments):
+        logger.warning(
+            "Dropping %d non-dict segments in %s", len(segments) - len(valid), segments_path
+        )
+    return valid
 
 
 def _load_features(h5_path: Path) -> tuple[np.ndarray, np.ndarray, float, float]:
@@ -237,6 +246,10 @@ def _find_pause_boundaries(
     Returns:
         List of pause boundary times in seconds (deduplicated).
     """
+    # Handle empty melspec gracefully
+    if melspec.size == 0 or melspec.shape[0] == 0:
+        return []
+
     # Compute frame-level energy (mean across mel bins)
     frame_energy = np.mean(melspec, axis=1)
 
@@ -604,7 +617,7 @@ def _validate_invariants(data: dict) -> tuple[bool, str | None]:
     Invariants:
     - end_sec >= start_sec
     - duration_sec == end_sec - start_sec (approximately)
-    - No NaN/Inf values
+    - No NaN/Inf values in numeric fields (start_sec, end_sec, duration_sec, confidence, best_score)
 
     Args:
         data: Preview data dict.
@@ -616,8 +629,17 @@ def _validate_invariants(data: dict) -> tuple[bool, str | None]:
     end = data.get("end_sec", 0)
     duration = data.get("duration_sec", 0)
 
-    # Check for NaN/Inf
-    for field_name, value in [("start_sec", start), ("end_sec", end), ("duration_sec", duration)]:
+    # Check for NaN/Inf in all numeric fields (including optional ones)
+    numeric_fields = {
+        "start_sec": start,
+        "end_sec": end,
+        "duration_sec": duration,
+        "confidence": data.get("confidence"),
+        "best_score": data.get("best_score"),
+    }
+    for field_name, value in numeric_fields.items():
+        if value is None:
+            continue
         if math.isnan(value) or math.isinf(value):
             return False, f"{field_name} contains NaN/Inf"
 
