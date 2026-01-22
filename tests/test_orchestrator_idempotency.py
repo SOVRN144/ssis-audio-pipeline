@@ -17,6 +17,7 @@ from app.models import ArtifactIndex, AudioAsset, PipelineJob, StageLock
 from app.orchestrator import (
     ARTIFACT_TYPE_FEATURES_H5,
     ARTIFACT_TYPE_NORMALIZED_WAV,
+    ARTIFACT_TYPE_PREVIEW_V1,
     ARTIFACT_TYPE_SEGMENTS_V1,
     STAGE_DECODE,
     STAGE_FEATURES,
@@ -635,7 +636,7 @@ class TestFeaturesLockAliasConsistency:
             session.close()
 
     def test_all_stages_complete_returns_no_work(self, asset_with_decode_complete):
-        """Should return no_work when all stages including segments are complete."""
+        """Should return no_work when all stages including preview are complete."""
         asset_id, SessionFactory = asset_with_decode_complete
         expected_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
 
@@ -660,6 +661,16 @@ class TestFeaturesLockAliasConsistency:
                 schema_version="1.0.0",
             )
             session.add(segments_artifact)
+
+            # Pre-create preview artifact (Step 7)
+            preview_artifact = ArtifactIndex(
+                asset_id=asset_id,
+                artifact_type=ARTIFACT_TYPE_PREVIEW_V1,
+                artifact_path=f"/data/preview/{asset_id}.preview.v1.json",
+                feature_spec_alias=None,
+                schema_version="1.0.0",
+            )
+            session.add(preview_artifact)
             session.commit()
 
             result = _orchestrator_tick_impl(session, asset_id)
