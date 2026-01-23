@@ -49,7 +49,7 @@ Per Blueprint Section 4, artifacts are stored at these canonical paths:
 ### Feature Spec Alias
 
 The `feature_spec_alias` is computed as:
-```
+```text
 feature_spec_alias = sha256(feature_spec_id)[:12]
 ```
 
