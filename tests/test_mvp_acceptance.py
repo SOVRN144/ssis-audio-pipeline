@@ -180,7 +180,7 @@ def mvp_test_env():
 
         # Create database
         db_path = tmpdir / "data" / "test.db"
-        engine, SessionFactory = init_db(db_path)
+        engine, SessionFactory = init_db(str(db_path))
 
         # Create test asset
         asset_id = f"mvp-test-{uuid.uuid4().hex[:8]}"
@@ -720,8 +720,7 @@ class TestResilienceHarnessReference:
                 "Step 8 resilience harness (test_resilience_harness.py) not yet merged. "
                 "This test will pass once Step 8 is merged."
             )
-        # If we reach here, the file exists
-        assert True
+        # File exists - test passes implicitly
 
     def test_resilience_harness_has_required_test_classes(self):
         """Resilience harness contains required test classes."""
@@ -787,66 +786,10 @@ class TestRequiredMetricsKeys:
         assert hasattr(metrics, "chunk_count"), "Missing chunk_count"
         assert hasattr(metrics, "decode_time_ms"), "Missing decode_time_ms"
 
-    def test_features_worker_has_required_metrics(self):
-        """Features worker includes Section 10 required metrics in result."""
-        # Section 10: "features: inference time, mel/embedding shapes, NaN/Inf count, spec alias/id"
-        from services.worker_features.run import FeaturesResult
-
-        # FeaturesResult uses a dict for metrics, verify expected keys are documented
-        result = FeaturesResult(ok=True)
-        result.metrics = {
-            "feature_time_ms": 0,  # inference time
-            "mel_shape": [0, 0],  # mel shape
-            "embedding_shape": [0, 0],  # embedding shape
-            "nan_inf_count": 0,  # NaN/Inf count
-            "feature_spec_id": "",  # spec id
-            "feature_spec_alias": "",  # spec alias
-        }
-
-        # These keys must be present per Section 10
-        required_keys = [
-            "feature_time_ms",
-            "mel_shape",
-            "embedding_shape",
-            "nan_inf_count",
-            "feature_spec_id",
-            "feature_spec_alias",
-        ]
-        for key in required_keys:
-            assert key in result.metrics, f"Features metrics should include {key}"
-
-    def test_segments_worker_has_required_metrics(self):
-        """Segments worker includes Section 10 required metrics."""
-        # Section 10: "segments: segment count, class distribution, flip rate"
-        from services.worker_segments.run import SegmentsResult
-
-        result = SegmentsResult(ok=True)
-        result.metrics = {
-            "segment_count": 0,
-            "class_distribution": {},
-            "flip_rate": 0.0,
-        }
-
-        required_keys = ["segment_count", "class_distribution", "flip_rate"]
-        for key in required_keys:
-            assert key in result.metrics, f"Segments metrics should include {key}"
-
-    def test_preview_worker_has_required_metrics(self):
-        """Preview worker includes Section 10 required metrics."""
-        # Section 10: "preview: candidate count, best score, fallback_used, spec alias used"
-        from services.worker_preview.run import PreviewResult
-
-        result = PreviewResult(ok=True)
-        result.metrics = {
-            "candidate_count": 0,
-            "best_score": 0.0,
-            "fallback_used": False,
-            "spec_alias_used": "",
-        }
-
-        required_keys = ["candidate_count", "best_score", "fallback_used", "spec_alias_used"]
-        for key in required_keys:
-            assert key in result.metrics, f"Preview metrics should include {key}"
+    # NOTE: Features, segments, and preview metrics validation has been moved to
+    # runtime tests (TestRuntimeTelemetry) which verify actual DB metrics_json
+    # after worker execution. The previous tests were circular (assigning dict
+    # then asserting keys exist).
 
 
 # --- Test: CLI Entrypoints Exist ---
@@ -878,3 +821,629 @@ class TestCLIEntrypoints:
         worker_path = Path(__file__).parent.parent / "services" / "worker_preview" / "run.py"
         content = worker_path.read_text()
         assert 'if __name__ == "__main__"' in content, "Preview worker missing CLI entrypoint"
+
+
+# --- Helper for Runtime Telemetry Tests ---
+
+
+def get_latest_job_metrics(SessionFactory, asset_id: str, stage: str) -> dict:
+    """Retrieve metrics_json from the most recent PipelineJob for given asset and stage.
+
+    Args:
+        SessionFactory: SQLAlchemy session factory.
+        asset_id: The asset ID.
+        stage: Pipeline stage name (decode, features, segments, preview).
+
+    Returns:
+        Parsed metrics dictionary.
+
+    Raises:
+        AssertionError: If no job found or metrics_json is missing.
+    """
+    session = SessionFactory()
+    job = (
+        session.query(PipelineJob)
+        .filter(PipelineJob.asset_id == asset_id, PipelineJob.stage == stage)
+        .order_by(PipelineJob.finished_at.desc())
+        .first()
+    )
+    assert job is not None, f"Missing PipelineJob for stage={stage}"
+    assert job.metrics_json is not None, f"Missing metrics_json for stage={stage}"
+    metrics = (
+        job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
+    )
+    session.close()
+    return metrics
+
+
+# --- Helper for HDF5 Determinism ---
+
+
+def hdf5_invariant_fingerprint(h5_path: Path) -> dict:
+    """Compute fingerprint of HDF5 file structure (datasets, shapes, dtypes).
+
+    This captures the structural invariants without comparing actual data values,
+    which may have floating-point precision differences.
+
+    Args:
+        h5_path: Path to HDF5 file.
+
+    Returns:
+        Dict with dataset names, shapes, and dtypes.
+    """
+    import h5py
+
+    fingerprint = {"datasets": {}}
+    with h5py.File(str(h5_path), "r") as f:
+        for name in f.keys():
+            ds = f[name]
+            if hasattr(ds, "shape"):  # Dataset, not group
+                fingerprint["datasets"][name] = {
+                    "shape": list(ds.shape),
+                    "dtype": str(ds.dtype),
+                }
+    return fingerprint
+
+
+# --- Test: Determinism with json_semantic_hash ---
+
+
+class TestDeterminismWithHash:
+    """Tests for artifact determinism using json_semantic_hash."""
+
+    def test_segments_produces_deterministic_json(self, mvp_test_env, monkeypatch):
+        """Running segments twice produces semantically identical JSON."""
+        require_ffmpeg()
+        require_ml_dependencies()
+        tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
+
+        audio_dir = tmpdir / "data" / "audio"
+        segments_dir = tmpdir / "data" / "segments"
+        repo_root = Path(__file__).parent.parent
+
+        # Run decode first
+        decode_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+
+        decode_result = subprocess.run(
+            [sys.executable, "-c", decode_script],
+            capture_output=True,
+            timeout=60,
+        )
+        assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
+
+        # Run segments first time
+        segments_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.SEGMENTS_DIR = Path("{segments_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+
+from services.worker_segments.run import run_segments_worker
+result = run_segments_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+
+        result1 = subprocess.run(
+            [sys.executable, "-c", segments_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result1.returncode == 0, f"First segments run failed: {result1.stderr.decode()}"
+
+        # Read and hash first segments JSON
+        segments_path = segments_dir / f"{asset_id}.segments.v1.json"
+        assert segments_path.exists(), "Segments JSON should exist after first run"
+        data1 = json.loads(segments_path.read_text())
+        hash1 = json_semantic_hash(data1)
+
+        # Delete segments JSON to force re-creation
+        segments_path.unlink()
+
+        # Run segments second time
+        result2 = subprocess.run(
+            [sys.executable, "-c", segments_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result2.returncode == 0, f"Second segments run failed: {result2.stderr.decode()}"
+
+        # Read and hash second segments JSON
+        assert segments_path.exists(), "Segments JSON should exist after second run"
+        data2 = json.loads(segments_path.read_text())
+        hash2 = json_semantic_hash(data2)
+
+        # Compare hashes
+        assert hash1 == hash2, "Segments JSON should be semantically identical across runs"
+
+    def test_preview_produces_deterministic_json(self, mvp_test_env, monkeypatch):
+        """Running preview twice produces semantically identical JSON."""
+        require_ffmpeg()
+        require_ml_dependencies()
+        tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
+
+        audio_dir = tmpdir / "data" / "audio"
+        features_dir = tmpdir / "data" / "features"
+        segments_dir = tmpdir / "data" / "segments"
+        preview_dir = tmpdir / "data" / "preview"
+        repo_root = Path(__file__).parent.parent
+
+        # Run decode
+        decode_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+
+        # Run features
+        features_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.FEATURES_DIR = Path("{features_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+
+from services.worker_features.run import run_features_worker
+result = run_features_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", features_script], capture_output=True, timeout=120)
+
+        # Run segments
+        segments_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.SEGMENTS_DIR = Path("{segments_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+
+from services.worker_segments.run import run_segments_worker
+result = run_segments_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", segments_script], capture_output=True, timeout=120)
+
+        # Run preview first time
+        preview_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.FEATURES_DIR = Path("{features_dir}")
+app.config.SEGMENTS_DIR = Path("{segments_dir}")
+app.config.PREVIEW_DIR = Path("{preview_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+app.utils.paths.PREVIEW_DIR = Path("{preview_dir}")
+
+from services.worker_preview.run import run_preview_worker
+result = run_preview_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+
+        result1 = subprocess.run(
+            [sys.executable, "-c", preview_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result1.returncode == 0, f"First preview run failed: {result1.stderr.decode()}"
+
+        # Read and hash first preview JSON
+        preview_path = preview_dir / f"{asset_id}.preview.v1.json"
+        assert preview_path.exists(), "Preview JSON should exist after first run"
+        data1 = json.loads(preview_path.read_text())
+        hash1 = json_semantic_hash(data1)
+
+        # Delete preview JSON to force re-creation
+        preview_path.unlink()
+
+        # Run preview second time
+        result2 = subprocess.run(
+            [sys.executable, "-c", preview_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result2.returncode == 0, f"Second preview run failed: {result2.stderr.decode()}"
+
+        # Read and hash second preview JSON
+        assert preview_path.exists(), "Preview JSON should exist after second run"
+        data2 = json.loads(preview_path.read_text())
+        hash2 = json_semantic_hash(data2)
+
+        # Compare hashes
+        assert hash1 == hash2, "Preview JSON should be semantically identical across runs"
+
+    def test_features_produces_deterministic_hdf5_invariants(self, mvp_test_env, monkeypatch):
+        """Running features twice produces HDF5 with identical structure."""
+        require_ffmpeg()
+        require_ml_dependencies()
+        tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
+
+        audio_dir = tmpdir / "data" / "audio"
+        features_dir = tmpdir / "data" / "features"
+        repo_root = Path(__file__).parent.parent
+
+        # Run decode
+        decode_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+
+        # Run features first time
+        features_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.FEATURES_DIR = Path("{features_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+
+from services.worker_features.run import run_features_worker
+result = run_features_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+
+        result1 = subprocess.run(
+            [sys.executable, "-c", features_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result1.returncode == 0, f"First features run failed: {result1.stderr.decode()}"
+
+        # Find the HDF5 file
+        from app.config import DEFAULT_FEATURE_SPEC_ID
+        from app.utils.hashing import feature_spec_alias
+
+        alias = feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        hdf5_path = features_dir / f"{asset_id}.{alias}.h5"
+        assert hdf5_path.exists(), f"Features HDF5 should exist at {hdf5_path}"
+
+        # Compute fingerprint of first HDF5
+        fp1 = hdf5_invariant_fingerprint(hdf5_path)
+        fp1_hash = json_semantic_hash(fp1)
+
+        # Delete HDF5 to force re-creation
+        hdf5_path.unlink()
+
+        # Run features second time
+        result2 = subprocess.run(
+            [sys.executable, "-c", features_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result2.returncode == 0, f"Second features run failed: {result2.stderr.decode()}"
+
+        # Compute fingerprint of second HDF5
+        assert hdf5_path.exists(), "Features HDF5 should exist after second run"
+        fp2 = hdf5_invariant_fingerprint(hdf5_path)
+        fp2_hash = json_semantic_hash(fp2)
+
+        # Compare fingerprints
+        assert fp1_hash == fp2_hash, "Features HDF5 structure should be identical across runs"
+
+
+# --- Test: Runtime Telemetry ---
+
+
+class TestRuntimeTelemetry:
+    """Tests verifying metrics are written to DB during actual worker execution."""
+
+    def test_features_metrics_contain_required_keys_runtime(self, mvp_test_env, monkeypatch):
+        """Features worker writes Section 10 required metrics to DB."""
+        require_ffmpeg()
+        require_ml_dependencies()
+        tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
+
+        audio_dir = tmpdir / "data" / "audio"
+        features_dir = tmpdir / "data" / "features"
+        repo_root = Path(__file__).parent.parent
+
+        # Run decode first
+        decode_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+
+        # Run features worker
+        features_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.FEATURES_DIR = Path("{features_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+
+from services.worker_features.run import run_features_worker
+result = run_features_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+
+        result = subprocess.run(
+            [sys.executable, "-c", features_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, f"Features worker failed: {result.stderr.decode()}"
+
+        # Verify DB metrics
+        metrics = get_latest_job_metrics(SessionFactory, asset_id, "features")
+
+        # Section 10: "features: inference time, mel/embedding shapes, NaN/Inf count, spec alias/id"
+        required_keys = [
+            "feature_time_ms",
+            "mel_shape",
+            "embedding_shape",
+            "nan_inf_count",
+            "feature_spec_id",
+            "feature_spec_alias",
+        ]
+        for key in required_keys:
+            assert key in metrics, f"Features metrics_json missing required key: {key}"
+
+    def test_segments_metrics_contain_required_keys_runtime(self, mvp_test_env, monkeypatch):
+        """Segments worker writes Section 10 required metrics to DB."""
+        require_ffmpeg()
+        require_ml_dependencies()
+        tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
+
+        audio_dir = tmpdir / "data" / "audio"
+        segments_dir = tmpdir / "data" / "segments"
+        repo_root = Path(__file__).parent.parent
+
+        # Run decode first
+        decode_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+
+        # Run segments worker
+        segments_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.SEGMENTS_DIR = Path("{segments_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+
+from services.worker_segments.run import run_segments_worker
+result = run_segments_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+
+        result = subprocess.run(
+            [sys.executable, "-c", segments_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, f"Segments worker failed: {result.stderr.decode()}"
+
+        # Verify DB metrics
+        metrics = get_latest_job_metrics(SessionFactory, asset_id, "segments")
+
+        # Section 10: "segments: segment count, class distribution, flip rate"
+        required_keys = ["segment_count", "class_distribution", "flip_rate"]
+        for key in required_keys:
+            assert key in metrics, f"Segments metrics_json missing required key: {key}"
+
+    def test_preview_metrics_contain_required_keys_runtime(self, mvp_test_env, monkeypatch):
+        """Preview worker writes Section 10 required metrics to DB."""
+        require_ffmpeg()
+        require_ml_dependencies()
+        tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
+
+        audio_dir = tmpdir / "data" / "audio"
+        features_dir = tmpdir / "data" / "features"
+        segments_dir = tmpdir / "data" / "segments"
+        preview_dir = tmpdir / "data" / "preview"
+        repo_root = Path(__file__).parent.parent
+
+        # Run decode
+        decode_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+
+        # Run features
+        features_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.FEATURES_DIR = Path("{features_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+
+from services.worker_features.run import run_features_worker
+result = run_features_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", features_script], capture_output=True, timeout=120)
+
+        # Run segments
+        segments_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.SEGMENTS_DIR = Path("{segments_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+
+from services.worker_segments.run import run_segments_worker
+result = run_segments_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+        subprocess.run([sys.executable, "-c", segments_script], capture_output=True, timeout=120)
+
+        # Run preview worker
+        preview_script = cli_script(f'''
+import sys
+from pathlib import Path
+sys.path.insert(0, "{repo_root}")
+
+import app.config
+app.config.AUDIO_DIR = Path("{audio_dir}")
+app.config.FEATURES_DIR = Path("{features_dir}")
+app.config.SEGMENTS_DIR = Path("{segments_dir}")
+app.config.PREVIEW_DIR = Path("{preview_dir}")
+app.config.DB_PATH = Path("{db_path}")
+
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+app.utils.paths.PREVIEW_DIR = Path("{preview_dir}")
+
+from services.worker_preview.run import run_preview_worker
+result = run_preview_worker("{asset_id}")
+sys.exit(0 if result.ok else 1)
+''')
+
+        result = subprocess.run(
+            [sys.executable, "-c", preview_script],
+            capture_output=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, f"Preview worker failed: {result.stderr.decode()}"
+
+        # Verify DB metrics
+        metrics = get_latest_job_metrics(SessionFactory, asset_id, "preview")
+
+        # Section 10: "preview: candidate count, best score, fallback_used, spec alias used"
+        required_keys = ["candidate_count", "best_score", "fallback_used", "spec_alias_used"]
+        for key in required_keys:
+            assert key in metrics, f"Preview metrics_json missing required key: {key}"
