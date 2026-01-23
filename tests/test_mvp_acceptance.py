@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import uuid
 import wave
 from pathlib import Path
@@ -82,6 +83,11 @@ def require_ml_dependencies() -> None:
 
 
 # --- Helper Functions ---
+
+
+def cli_script(s: str) -> str:
+    """Normalize embedded python -c scripts so they have no leading indentation."""
+    return textwrap.dedent(s).lstrip()
 
 
 def create_test_wav(path: Path, duration_sec: float = 2.5, sample_rate: int = 22050) -> None:
@@ -232,30 +238,30 @@ class TestOfflineCPURun:
 
         # Build the CLI script
         repo_root = Path(__file__).parent.parent
-        script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-# Patch config before importing workers
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            # Patch config before importing workers
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-# Also patch paths module
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            # Also patch paths module
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
 
-from services.worker_decode.run import run_decode_worker
+            from services.worker_decode.run import run_decode_worker
 
-result = run_decode_worker("{asset_id}")
-if result.ok:
-    print(f"SUCCESS: {{result.artifact_path}}")
-    sys.exit(0)
-else:
-    print(f"FAILED: {{result.error_code}} - {{result.message}}")
-    sys.exit(1)
-'''
+            result = run_decode_worker("{asset_id}")
+            if result.ok:
+                print(f"SUCCESS: {{result.artifact_path}}")
+                sys.exit(0)
+            else:
+                print(f"FAILED: {{result.error_code}} - {{result.message}}")
+                sys.exit(1)
+        ''')
 
         result = subprocess.run(
             [sys.executable, "-c", script],
@@ -287,22 +293,22 @@ else:
         repo_root = Path(__file__).parent.parent
 
         # First run decode to create normalized.wav
-        decode_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        decode_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
 
-from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
-sys.exit(0 if result.ok else 1)
-'''
+            from services.worker_decode.run import run_decode_worker
+            result = run_decode_worker("{asset_id}")
+            sys.exit(0 if result.ok else 1)
+        ''')
 
         decode_result = subprocess.run(
             [sys.executable, "-c", decode_script],
@@ -312,29 +318,29 @@ sys.exit(0 if result.ok else 1)
         assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
 
         # Now run features worker
-        features_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        features_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.FEATURES_DIR = Path("{features_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            app.utils.paths.FEATURES_DIR = Path("{features_dir}")
 
-from services.worker_features.run import run_features_worker
-result = run_features_worker("{asset_id}")
-if result.ok:
-    print(f"SUCCESS: {{result.artifact_path}}")
-    sys.exit(0)
-else:
-    print(f"FAILED: {{result.error_code}} - {{result.message}}")
-    sys.exit(1)
-'''
+            from services.worker_features.run import run_features_worker
+            result = run_features_worker("{asset_id}")
+            if result.ok:
+                print(f"SUCCESS: {{result.artifact_path}}")
+                sys.exit(0)
+            else:
+                print(f"FAILED: {{result.error_code}} - {{result.message}}")
+                sys.exit(1)
+        ''')
 
         result = subprocess.run(
             [sys.executable, "-c", features_script],
@@ -365,22 +371,22 @@ else:
         repo_root = Path(__file__).parent.parent
 
         # First run decode to create normalized.wav
-        decode_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        decode_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
 
-from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
-sys.exit(0 if result.ok else 1)
-'''
+            from services.worker_decode.run import run_decode_worker
+            result = run_decode_worker("{asset_id}")
+            sys.exit(0 if result.ok else 1)
+        ''')
 
         decode_result = subprocess.run(
             [sys.executable, "-c", decode_script],
@@ -390,29 +396,29 @@ sys.exit(0 if result.ok else 1)
         assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
 
         # Now run segments worker
-        segments_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        segments_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.SEGMENTS_DIR = Path("{segments_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
 
-from services.worker_segments.run import run_segments_worker
-result = run_segments_worker("{asset_id}")
-if result.ok:
-    print(f"SUCCESS: {{result.artifact_path}}")
-    sys.exit(0)
-else:
-    print(f"FAILED: {{result.error_code}} - {{result.message}}")
-    sys.exit(1)
-'''
+            from services.worker_segments.run import run_segments_worker
+            result = run_segments_worker("{asset_id}")
+            if result.ok:
+                print(f"SUCCESS: {{result.artifact_path}}")
+                sys.exit(0)
+            else:
+                print(f"FAILED: {{result.error_code}} - {{result.message}}")
+                sys.exit(1)
+        ''')
 
         result = subprocess.run(
             [sys.executable, "-c", segments_script],
@@ -440,22 +446,22 @@ else:
         repo_root = Path(__file__).parent.parent
 
         # First run decode to create normalized.wav
-        decode_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        decode_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
 
-from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
-sys.exit(0 if result.ok else 1)
-'''
+            from services.worker_decode.run import run_decode_worker
+            result = run_decode_worker("{asset_id}")
+            sys.exit(0 if result.ok else 1)
+        ''')
 
         decode_result = subprocess.run(
             [sys.executable, "-c", decode_script],
@@ -465,24 +471,24 @@ sys.exit(0 if result.ok else 1)
         assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
 
         # Run features worker (required by preview)
-        features_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        features_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.FEATURES_DIR = Path("{features_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            app.utils.paths.FEATURES_DIR = Path("{features_dir}")
 
-from services.worker_features.run import run_features_worker
-result = run_features_worker("{asset_id}")
-sys.exit(0 if result.ok else 1)
-'''
+            from services.worker_features.run import run_features_worker
+            result = run_features_worker("{asset_id}")
+            sys.exit(0 if result.ok else 1)
+        ''')
 
         features_result = subprocess.run(
             [sys.executable, "-c", features_script],
@@ -494,24 +500,24 @@ sys.exit(0 if result.ok else 1)
         )
 
         # Run segments worker (required by preview)
-        segments_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        segments_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.SEGMENTS_DIR = Path("{segments_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
 
-from services.worker_segments.run import run_segments_worker
-result = run_segments_worker("{asset_id}")
-sys.exit(0 if result.ok else 1)
-'''
+            from services.worker_segments.run import run_segments_worker
+            result = run_segments_worker("{asset_id}")
+            sys.exit(0 if result.ok else 1)
+        ''')
 
         segments_result = subprocess.run(
             [sys.executable, "-c", segments_script],
@@ -523,33 +529,33 @@ sys.exit(0 if result.ok else 1)
         )
 
         # Now run preview worker
-        preview_script = f'''
-import sys
-from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+        preview_script = cli_script(f'''
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, "{repo_root}")
 
-import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.PREVIEW_DIR = Path("{preview_dir}")
-app.config.DB_PATH = Path("{db_path}")
+            import app.config
+            app.config.AUDIO_DIR = Path("{audio_dir}")
+            app.config.FEATURES_DIR = Path("{features_dir}")
+            app.config.SEGMENTS_DIR = Path("{segments_dir}")
+            app.config.PREVIEW_DIR = Path("{preview_dir}")
+            app.config.DB_PATH = Path("{db_path}")
 
-import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
-app.utils.paths.PREVIEW_DIR = Path("{preview_dir}")
+            import app.utils.paths
+            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+            app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+            app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+            app.utils.paths.PREVIEW_DIR = Path("{preview_dir}")
 
-from services.worker_preview.run import run_preview_worker
-result = run_preview_worker("{asset_id}")
-if result.ok:
-    print(f"SUCCESS: {{result.artifact_path}}")
-    sys.exit(0)
-else:
-    print(f"FAILED: {{result.error_code}} - {{result.message}}")
-    sys.exit(1)
-'''
+            from services.worker_preview.run import run_preview_worker
+            result = run_preview_worker("{asset_id}")
+            if result.ok:
+                print(f"SUCCESS: {{result.artifact_path}}")
+                sys.exit(0)
+            else:
+                print(f"FAILED: {{result.error_code}} - {{result.message}}")
+                sys.exit(1)
+        ''')
 
         result = subprocess.run(
             [sys.executable, "-c", preview_script],
@@ -580,7 +586,7 @@ class TestDeterministicArtifacts:
         repo_root = Path(__file__).parent.parent
 
         # Run decode first time
-        script = f'''
+        script = cli_script(f'''
 import sys
 from pathlib import Path
 sys.path.insert(0, "{repo_root}")
@@ -595,7 +601,7 @@ app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
 from services.worker_decode.run import run_decode_worker
 result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
-'''
+''')
 
         result1 = subprocess.run(
             [sys.executable, "-c", script],
@@ -641,7 +647,7 @@ class TestJobTelemetry:
         repo_root = Path(__file__).parent.parent
 
         # Run decode and capture metrics
-        script = f'''
+        script = cli_script(f'''
 import sys
 import json
 from pathlib import Path
@@ -668,7 +674,7 @@ if result.ok:
     sys.exit(0)
 else:
     sys.exit(1)
-'''
+''')
 
         result = subprocess.run(
             [sys.executable, "-c", script],
