@@ -4,6 +4,7 @@ Minimal configuration for Step 1. No external config libraries.
 All paths are relative to the repository root by default.
 """
 
+import os
 from pathlib import Path
 
 # Repository root (parent of app/)
@@ -26,8 +27,30 @@ DB_PATH = DATA_DIR / "ssis.db"
 QUEUE_DIR = DATA_DIR / "queue"
 HUEY_DB_PATH = QUEUE_DIR / "huey.db"
 
+
+def _get_lock_ttl() -> int:
+    """Get lock TTL from environment or use default.
+
+    Environment variable SSIS_LOCK_TTL_SEC allows override for testing.
+    Default is 600 seconds (~10 minutes) per Blueprint section 7.
+
+    Returns:
+        Lock TTL in seconds.
+    """
+    env_val = os.environ.get("SSIS_LOCK_TTL_SEC")
+    if env_val:
+        try:
+            ttl = int(env_val)
+            if ttl > 0:
+                return ttl
+        except ValueError:
+            pass
+    return 600  # Default: 10 minutes
+
+
 # Stage lock TTL in seconds (Blueprint section 7: ~10 minutes)
-STAGE_LOCK_TTL_SECONDS = 600
+# Override with SSIS_LOCK_TTL_SEC environment variable for testing
+STAGE_LOCK_TTL_SECONDS = _get_lock_ttl()
 
 # Canonical audio format (Blueprint section 1)
 CANONICAL_SAMPLE_RATE = 22050
