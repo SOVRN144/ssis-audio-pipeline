@@ -21,6 +21,11 @@ Error codes (Blueprint section 8):
 - FILE_CORRUPT: source file is corrupt or unreadable
 - FILE_TOO_SHORT: decoded audio is below minimum duration
 - INPUT_NOT_FOUND: source file does not exist
+
+Failpoints (Step 8 resilience harness):
+- DECODE_AFTER_CHUNK_WRITE: After writing a PCM chunk, before checkpoint
+- DECODE_AFTER_CHECKPOINT: After saving checkpoint
+- DECODE_BEFORE_FINAL_RENAME: Before atomic rename of final WAV
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from app.utils.checkpoints import (
     load_checkpoint,
     save_checkpoint,
 )
+from app.utils.failpoints import maybe_fail
 from app.utils.paths import audio_normalized_path
 
 if TYPE_CHECKING:
@@ -379,6 +385,9 @@ def _atomic_publish_wav(wav_tmp_path: Path, final_path: Path) -> None:
     finally:
         os.close(fd)
 
+    # Failpoint: before final rename
+    maybe_fail("DECODE_BEFORE_FINAL_RENAME")
+
     # Atomic rename
     os.replace(wav_tmp_path, final_path)
 
@@ -545,6 +554,9 @@ def decode_asset(
                 pcm_file.write(pcm_bytes)
                 pcm_file.flush()
 
+                # Failpoint: after chunk write, before checkpoint
+                maybe_fail("DECODE_AFTER_CHUNK_WRITE")
+
                 chunk_count += 1
                 is_first_chunk = False
 
@@ -560,6 +572,9 @@ def decode_asset(
                     current_pos,
                     paths["pcm_tmp"].name,
                 )
+
+                # Failpoint: after checkpoint save
+                maybe_fail("DECODE_AFTER_CHECKPOINT")
 
                 logger.debug("Chunk %d complete: %.2f seconds processed", chunk_count, current_pos)
 

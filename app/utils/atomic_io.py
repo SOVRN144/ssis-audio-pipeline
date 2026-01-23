@@ -7,10 +7,17 @@ Implements atomic publish rule per Blueprint section 4:
 
 This ensures that the final path either contains complete valid data
 or does not exist. Partial writes only affect the temp file.
+
+Failpoints (Step 8 resilience harness):
+- ATOMIC_WRITE_AFTER_TMP_WRITE: After writing to temp file, before fsync
+- ATOMIC_WRITE_AFTER_FSYNC_BEFORE_RENAME: After fsync, before atomic rename
+- ATOMIC_WRITE_AFTER_RENAME: After atomic rename completes
 """
 
 import os
 from pathlib import Path
+
+from app.utils.failpoints import maybe_fail
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -71,6 +78,10 @@ def atomic_write_bytes(
     fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
         _write_all(fd, data)
+
+        # Failpoint: after temp write, before fsync
+        maybe_fail("ATOMIC_WRITE_AFTER_TMP_WRITE")
+
         # Flush to OS buffers
         os.fsync(fd)
     except OSError:
@@ -87,8 +98,14 @@ def atomic_write_bytes(
     # Best-effort fsync on directory for rename durability
     _fsync_directory(final_path.parent)
 
+    # Failpoint: after fsync, before rename
+    maybe_fail("ATOMIC_WRITE_AFTER_FSYNC_BEFORE_RENAME")
+
     # Atomic rename (POSIX guarantees atomicity)
     os.replace(temp_path, final_path)
+
+    # Failpoint: after rename (for verifying completed writes)
+    maybe_fail("ATOMIC_WRITE_AFTER_RENAME")
 
 
 def atomic_write_text(

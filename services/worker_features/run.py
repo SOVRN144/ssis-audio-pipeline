@@ -26,6 +26,10 @@ Error codes (Blueprint section 8):
 - FEATURE_EXTRACTION_FAILED: General feature extraction failure
 - FEATURE_SPEC_ALIAS_COLLISION: Alias exists with different spec_id
 - INPUT_NOT_FOUND: normalized.wav does not exist
+
+Failpoints (Step 8 resilience harness):
+- FEATURES_AFTER_H5_TMP_WRITE: After writing HDF5 temp file, before fsync/rename
+- FEATURES_BEFORE_H5_RENAME: Before atomic rename of final HDF5
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ import numpy as np
 from app.config import CANONICAL_SAMPLE_RATE, DEFAULT_FEATURE_SPEC_ID, FEATURES_DIR
 from app.db import FeatureSpecAliasCollision, init_db, register_feature_spec
 from app.orchestrator import ARTIFACT_TYPE_FEATURES_H5
+from app.utils.failpoints import maybe_fail
 from app.utils.hashing import feature_spec_alias, sha256_file
 from app.utils.paths import audio_normalized_path, features_h5_path
 
@@ -406,12 +411,18 @@ def _write_hdf5_atomic(
             # Fall back to closing and fsyncing the path
             pass
 
+    # Failpoint: after temp file write, before final fsync/rename
+    maybe_fail("FEATURES_AFTER_H5_TMP_WRITE")
+
     # fsync the temp file via os
     fd = os.open(temp_path, os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+    # Failpoint: before atomic rename
+    maybe_fail("FEATURES_BEFORE_H5_RENAME")
 
     # Atomic rename
     os.replace(temp_path, final_path)
