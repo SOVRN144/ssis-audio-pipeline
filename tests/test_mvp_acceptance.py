@@ -90,6 +90,33 @@ def cli_script(s: str) -> str:
     return textwrap.dedent(s).lstrip()
 
 
+def run_cli(script: str, *, timeout: int, label: str) -> subprocess.CompletedProcess:
+    """Run a CLI script via subprocess and fail fast if it fails.
+
+    Args:
+        script: The Python script to execute.
+        timeout: Timeout in seconds.
+        label: Human-readable label for error messages.
+
+    Returns:
+        CompletedProcess on success.
+
+    Raises:
+        AssertionError: If the subprocess fails.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        timeout=timeout,
+    )
+    assert result.returncode == 0, (
+        f"{label} failed (rc={result.returncode}).\n"
+        f"STDOUT:\n{result.stdout.decode(errors='replace')}\n"
+        f"STDERR:\n{result.stderr.decode(errors='replace')}\n"
+    )
+    return result
+
+
 def create_test_wav(path: Path, duration_sec: float = 2.5, sample_rate: int = 22050) -> None:
     """Create a minimal valid WAV file for testing.
 
@@ -1007,7 +1034,7 @@ from services.worker_decode.run import run_decode_worker
 result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+        run_cli(decode_script, timeout=60, label="decode")
 
         # Run features
         features_script = cli_script(f'''
@@ -1028,7 +1055,7 @@ from services.worker_features.run import run_features_worker
 result = run_features_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", features_script], capture_output=True, timeout=120)
+        run_cli(features_script, timeout=120, label="features")
 
         # Run segments
         segments_script = cli_script(f'''
@@ -1049,7 +1076,7 @@ from services.worker_segments.run import run_segments_worker
 result = run_segments_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", segments_script], capture_output=True, timeout=120)
+        run_cli(segments_script, timeout=120, label="segments")
 
         # Run preview first time
         preview_script = cli_script(f'''
@@ -1134,7 +1161,7 @@ from services.worker_decode.run import run_decode_worker
 result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+        run_cli(decode_script, timeout=60, label="decode")
 
         # Run features first time
         features_script = cli_script(f'''
@@ -1228,7 +1255,7 @@ from services.worker_decode.run import run_decode_worker
 result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+        run_cli(decode_script, timeout=60, label="decode")
 
         # Run features worker
         features_script = cli_script(f'''
@@ -1250,12 +1277,7 @@ result = run_features_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", features_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result.returncode == 0, f"Features worker failed: {result.stderr.decode()}"
+        run_cli(features_script, timeout=120, label="features")
 
         # Verify DB metrics
         metrics = get_latest_job_metrics(SessionFactory, asset_id, "features")
@@ -1299,7 +1321,7 @@ from services.worker_decode.run import run_decode_worker
 result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+        run_cli(decode_script, timeout=60, label="decode")
 
         # Run segments worker
         segments_script = cli_script(f'''
@@ -1321,12 +1343,7 @@ result = run_segments_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", segments_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result.returncode == 0, f"Segments worker failed: {result.stderr.decode()}"
+        run_cli(segments_script, timeout=120, label="segments")
 
         # Verify DB metrics
         metrics = get_latest_job_metrics(SessionFactory, asset_id, "segments")
@@ -1365,7 +1382,7 @@ from services.worker_decode.run import run_decode_worker
 result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", decode_script], capture_output=True, timeout=60)
+        run_cli(decode_script, timeout=60, label="decode")
 
         # Run features
         features_script = cli_script(f'''
@@ -1386,7 +1403,7 @@ from services.worker_features.run import run_features_worker
 result = run_features_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", features_script], capture_output=True, timeout=120)
+        run_cli(features_script, timeout=120, label="features")
 
         # Run segments
         segments_script = cli_script(f'''
@@ -1407,7 +1424,7 @@ from services.worker_segments.run import run_segments_worker
 result = run_segments_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
-        subprocess.run([sys.executable, "-c", segments_script], capture_output=True, timeout=120)
+        run_cli(segments_script, timeout=120, label="segments")
 
         # Run preview worker
         preview_script = cli_script(f'''
