@@ -75,6 +75,18 @@ def require_ml_dependencies() -> None:
     if not yamnet_model.exists():
         pytest.skip("YamNet ONNX model not found; required for features/preview worker tests")
 
+    # Check for onnxruntime
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        pytest.skip("onnxruntime not installed; required for features/preview worker tests")
+
+    # Check for librosa
+    try:
+        import librosa  # noqa: F401
+    except ImportError:
+        pytest.skip("librosa not installed; required for features/preview worker tests")
+
     # Check for inaSpeechSegmenter
     try:
         import inaSpeechSegmenter  # noqa: F401
@@ -894,23 +906,32 @@ def hdf5_invariant_fingerprint(h5_path: Path) -> dict:
     This captures the structural invariants without comparing actual data values,
     which may have floating-point precision differences.
 
+    Recursively walks groups to capture nested datasets.
+
     Args:
         h5_path: Path to HDF5 file.
 
     Returns:
-        Dict with dataset names, shapes, and dtypes.
+        Dict with dataset names (full paths), shapes, and dtypes.
     """
     import h5py
 
     fingerprint = {"datasets": {}}
-    with h5py.File(str(h5_path), "r") as f:
-        for name in f.keys():
-            ds = f[name]
-            if hasattr(ds, "shape"):  # Dataset, not group
-                fingerprint["datasets"][name] = {
-                    "shape": list(ds.shape),
-                    "dtype": str(ds.dtype),
+
+    def visit(group, prefix: str = "") -> None:
+        for name, obj in group.items():
+            path = f"{prefix}/{name}" if prefix else name
+            if hasattr(obj, "shape"):  # Dataset
+                fingerprint["datasets"][path] = {
+                    "shape": list(obj.shape),
+                    "dtype": str(obj.dtype),
                 }
+            else:  # Group
+                visit(obj, path)
+
+    with h5py.File(str(h5_path), "r") as f:
+        visit(f)
+
     return fingerprint
 
 
@@ -1417,12 +1438,7 @@ result = run_preview_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", preview_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result.returncode == 0, f"Preview worker failed: {result.stderr.decode()}"
+        run_cli(preview_script, timeout=120, label="preview")
 
         # Verify DB metrics
         metrics = get_latest_job_metrics(SessionFactory, asset_id, "preview")
