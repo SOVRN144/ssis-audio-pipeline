@@ -868,19 +868,21 @@ def get_latest_job_metrics(SessionFactory, asset_id: str, stage: str) -> dict:
         AssertionError: If no job found or metrics_json is missing.
     """
     session = SessionFactory()
-    job = (
-        session.query(PipelineJob)
-        .filter(PipelineJob.asset_id == asset_id, PipelineJob.stage == stage)
-        .order_by(PipelineJob.finished_at.desc())
-        .first()
-    )
-    assert job is not None, f"Missing PipelineJob for stage={stage}"
-    assert job.metrics_json is not None, f"Missing metrics_json for stage={stage}"
-    metrics = (
-        job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
-    )
-    session.close()
-    return metrics
+    try:
+        job = (
+            session.query(PipelineJob)
+            .filter(PipelineJob.asset_id == asset_id, PipelineJob.stage == stage)
+            .order_by(PipelineJob.finished_at.desc())
+            .first()
+        )
+        assert job is not None, f"Missing PipelineJob for stage={stage}"
+        assert job.metrics_json is not None, f"Missing metrics_json for stage={stage}"
+        metrics = (
+            job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
+        )
+        return metrics
+    finally:
+        session.close()
 
 
 # --- Helper for HDF5 Determinism ---
@@ -946,12 +948,7 @@ result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        decode_result = subprocess.run(
-            [sys.executable, "-c", decode_script],
-            capture_output=True,
-            timeout=60,
-        )
-        assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
+        run_cli(decode_script, timeout=60, label="decode")
 
         # Run segments first time
         segments_script = cli_script(f'''
@@ -973,12 +970,7 @@ result = run_segments_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        result1 = subprocess.run(
-            [sys.executable, "-c", segments_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result1.returncode == 0, f"First segments run failed: {result1.stderr.decode()}"
+        run_cli(segments_script, timeout=120, label="segments")
 
         # Read and hash first segments JSON
         segments_path = segments_dir / f"{asset_id}.segments.v1.json"
@@ -990,12 +982,7 @@ sys.exit(0 if result.ok else 1)
         segments_path.unlink()
 
         # Run segments second time
-        result2 = subprocess.run(
-            [sys.executable, "-c", segments_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result2.returncode == 0, f"Second segments run failed: {result2.stderr.decode()}"
+        run_cli(segments_script, timeout=120, label="segments")
 
         # Read and hash second segments JSON
         assert segments_path.exists(), "Segments JSON should exist after second run"
@@ -1102,12 +1089,7 @@ result = run_preview_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        result1 = subprocess.run(
-            [sys.executable, "-c", preview_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result1.returncode == 0, f"First preview run failed: {result1.stderr.decode()}"
+        run_cli(preview_script, timeout=120, label="preview")
 
         # Read and hash first preview JSON
         preview_path = preview_dir / f"{asset_id}.preview.v1.json"
@@ -1119,12 +1101,7 @@ sys.exit(0 if result.ok else 1)
         preview_path.unlink()
 
         # Run preview second time
-        result2 = subprocess.run(
-            [sys.executable, "-c", preview_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result2.returncode == 0, f"Second preview run failed: {result2.stderr.decode()}"
+        run_cli(preview_script, timeout=120, label="preview")
 
         # Read and hash second preview JSON
         assert preview_path.exists(), "Preview JSON should exist after second run"
@@ -1183,12 +1160,7 @@ result = run_features_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        result1 = subprocess.run(
-            [sys.executable, "-c", features_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result1.returncode == 0, f"First features run failed: {result1.stderr.decode()}"
+        run_cli(features_script, timeout=120, label="features")
 
         # Find the HDF5 file
         from app.config import DEFAULT_FEATURE_SPEC_ID
@@ -1206,12 +1178,7 @@ sys.exit(0 if result.ok else 1)
         hdf5_path.unlink()
 
         # Run features second time
-        result2 = subprocess.run(
-            [sys.executable, "-c", features_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert result2.returncode == 0, f"Second features run failed: {result2.stderr.decode()}"
+        run_cli(features_script, timeout=120, label="features")
 
         # Compute fingerprint of second HDF5
         assert hdf5_path.exists(), "Features HDF5 should exist after second run"
