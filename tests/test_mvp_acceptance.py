@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -302,13 +303,7 @@ class TestOfflineCPURun:
                 sys.exit(1)
         ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            timeout=60,
-        )
-
-        assert result.returncode == 0, f"Decode failed: {result.stderr.decode()}"
+        result = run_cli(script, timeout=60, label="decode_cli")
         assert b"SUCCESS" in result.stdout
 
         # Verify artifact exists
@@ -349,12 +344,7 @@ class TestOfflineCPURun:
             sys.exit(0 if result.ok else 1)
         ''')
 
-        decode_result = subprocess.run(
-            [sys.executable, "-c", decode_script],
-            capture_output=True,
-            timeout=60,
-        )
-        assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
+        run_cli(decode_script, timeout=60, label="features_setup_decode")
 
         # Now run features worker
         features_script = cli_script(f'''
@@ -381,13 +371,7 @@ class TestOfflineCPURun:
                 sys.exit(1)
         ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", features_script],
-            capture_output=True,
-            timeout=120,
-        )
-
-        assert result.returncode == 0, f"Features failed: {result.stderr.decode()}"
+        result = run_cli(features_script, timeout=120, label="features_cli")
         assert b"SUCCESS" in result.stdout
 
         # Verify artifact exists with correct naming pattern
@@ -427,12 +411,7 @@ class TestOfflineCPURun:
             sys.exit(0 if result.ok else 1)
         ''')
 
-        decode_result = subprocess.run(
-            [sys.executable, "-c", decode_script],
-            capture_output=True,
-            timeout=60,
-        )
-        assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
+        run_cli(decode_script, timeout=60, label="segments_setup_decode")
 
         # Now run segments worker
         segments_script = cli_script(f'''
@@ -459,13 +438,7 @@ class TestOfflineCPURun:
                 sys.exit(1)
         ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", segments_script],
-            capture_output=True,
-            timeout=120,
-        )
-
-        assert result.returncode == 0, f"Segments failed: {result.stderr.decode()}"
+        result = run_cli(segments_script, timeout=120, label="segments_cli")
         assert b"SUCCESS" in result.stdout
 
         # Verify artifact exists
@@ -502,12 +475,7 @@ class TestOfflineCPURun:
             sys.exit(0 if result.ok else 1)
         ''')
 
-        decode_result = subprocess.run(
-            [sys.executable, "-c", decode_script],
-            capture_output=True,
-            timeout=60,
-        )
-        assert decode_result.returncode == 0, f"Decode failed: {decode_result.stderr.decode()}"
+        run_cli(decode_script, timeout=60, label="preview_setup_decode")
 
         # Run features worker (required by preview)
         features_script = cli_script(f'''
@@ -529,14 +497,7 @@ class TestOfflineCPURun:
             sys.exit(0 if result.ok else 1)
         ''')
 
-        features_result = subprocess.run(
-            [sys.executable, "-c", features_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert features_result.returncode == 0, (
-            f"Features failed: {features_result.stderr.decode()}"
-        )
+        run_cli(features_script, timeout=120, label="preview_setup_features")
 
         # Run segments worker (required by preview)
         segments_script = cli_script(f'''
@@ -558,14 +519,7 @@ class TestOfflineCPURun:
             sys.exit(0 if result.ok else 1)
         ''')
 
-        segments_result = subprocess.run(
-            [sys.executable, "-c", segments_script],
-            capture_output=True,
-            timeout=120,
-        )
-        assert segments_result.returncode == 0, (
-            f"Segments failed: {segments_result.stderr.decode()}"
-        )
+        run_cli(segments_script, timeout=120, label="preview_setup_segments")
 
         # Now run preview worker
         preview_script = cli_script(f'''
@@ -596,13 +550,7 @@ class TestOfflineCPURun:
                 sys.exit(1)
         ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", preview_script],
-            capture_output=True,
-            timeout=120,
-        )
-
-        assert result.returncode == 0, f"Preview failed: {result.stderr.decode()}"
+        result = run_cli(preview_script, timeout=120, label="preview_cli")
         assert b"SUCCESS" in result.stdout
 
         # Verify artifact exists
@@ -642,12 +590,7 @@ result = run_decode_worker("{asset_id}")
 sys.exit(0 if result.ok else 1)
 ''')
 
-        result1 = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            timeout=60,
-        )
-        assert result1.returncode == 0, f"First decode failed: {result1.stderr.decode()}"
+        run_cli(script, timeout=60, label="determinism_decode_first")
 
         # Read first WAV content
         normalized_wav = audio_dir / asset_id / "normalized.wav"
@@ -657,12 +600,7 @@ sys.exit(0 if result.ok else 1)
         normalized_wav.unlink()
 
         # Run decode second time
-        result2 = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            timeout=60,
-        )
-        assert result2.returncode == 0, f"Second decode failed: {result2.stderr.decode()}"
+        run_cli(script, timeout=60, label="determinism_decode_second")
 
         # Read second WAV content
         wav_content_2 = normalized_wav.read_bytes()
@@ -715,12 +653,7 @@ else:
     sys.exit(1)
 ''')
 
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            timeout=60,
-        )
-        assert result.returncode == 0, f"Decode failed: {result.stderr.decode()}"
+        result = run_cli(script, timeout=60, label="decode_metrics_cli")
 
         # Parse metrics from output
         stdout = result.stdout.decode()
@@ -841,25 +774,33 @@ class TestCLIEntrypoints:
         """worker_decode/run.py has if __name__ == '__main__' block."""
         worker_path = Path(__file__).parent.parent / "services" / "worker_decode" / "run.py"
         content = worker_path.read_text()
-        assert 'if __name__ == "__main__"' in content, "Decode worker missing CLI entrypoint"
+        assert re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]', content), (
+            "Decode worker missing CLI entrypoint"
+        )
 
     def test_features_worker_has_main_block(self):
         """worker_features/run.py has if __name__ == '__main__' block."""
         worker_path = Path(__file__).parent.parent / "services" / "worker_features" / "run.py"
         content = worker_path.read_text()
-        assert 'if __name__ == "__main__"' in content, "Features worker missing CLI entrypoint"
+        assert re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]', content), (
+            "Features worker missing CLI entrypoint"
+        )
 
     def test_segments_worker_has_main_block(self):
         """worker_segments/run.py has if __name__ == '__main__' block."""
         worker_path = Path(__file__).parent.parent / "services" / "worker_segments" / "run.py"
         content = worker_path.read_text()
-        assert 'if __name__ == "__main__"' in content, "Segments worker missing CLI entrypoint"
+        assert re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]', content), (
+            "Segments worker missing CLI entrypoint"
+        )
 
     def test_preview_worker_has_main_block(self):
         """worker_preview/run.py has if __name__ == '__main__' block."""
         worker_path = Path(__file__).parent.parent / "services" / "worker_preview" / "run.py"
         content = worker_path.read_text()
-        assert 'if __name__ == "__main__"' in content, "Preview worker missing CLI entrypoint"
+        assert re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]', content), (
+            "Preview worker missing CLI entrypoint"
+        )
 
 
 # --- Helper for Runtime Telemetry Tests ---
