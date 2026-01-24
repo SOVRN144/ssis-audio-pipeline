@@ -59,40 +59,36 @@ def require_ffmpeg() -> None:
         pytest.skip("ffmpeg not found in PATH; required for decode worker tests")
 
 
-def require_ml_dependencies() -> None:
-    """Skip test if ML dependencies (YamNet ONNX, inaSpeechSegmenter) are not available.
+def require_ml_dependencies(*, needs_features: bool = False, needs_segments: bool = False) -> None:
+    """Skip test if optional ML dependencies are missing for requested stages."""
+    if needs_features:
+        yamnet_model = (
+            Path(__file__).parent.parent
+            / "services"
+            / "worker_features"
+            / "yamnet_onnx"
+            / "yamnet.onnx"
+        )
+        if not yamnet_model.exists():
+            pytest.skip("YamNet ONNX model not found; required for features/preview worker tests")
 
-    These are optional dependencies for the full pipeline. Tests that require
-    real ML inference should call this guard.
-    """
-    # Check for YamNet ONNX model
-    yamnet_model = (
-        Path(__file__).parent.parent
-        / "services"
-        / "worker_features"
-        / "yamnet_onnx"
-        / "yamnet.onnx"
-    )
-    if not yamnet_model.exists():
-        pytest.skip("YamNet ONNX model not found; required for features/preview worker tests")
+        try:
+            import onnxruntime  # noqa: F401
+        except ImportError:
+            pytest.skip("onnxruntime not installed; required for features/preview worker tests")
 
-    # Check for onnxruntime
-    try:
-        import onnxruntime  # noqa: F401
-    except ImportError:
-        pytest.skip("onnxruntime not installed; required for features/preview worker tests")
+        try:
+            import librosa  # noqa: F401
+        except ImportError:
+            pytest.skip("librosa not installed; required for features/preview worker tests")
 
-    # Check for librosa
-    try:
-        import librosa  # noqa: F401
-    except ImportError:
-        pytest.skip("librosa not installed; required for features/preview worker tests")
-
-    # Check for inaSpeechSegmenter
-    try:
-        import inaSpeechSegmenter  # noqa: F401
-    except ImportError:
-        pytest.skip("inaSpeechSegmenter not installed; required for segments/preview worker tests")
+    if needs_segments:
+        try:
+            import inaSpeechSegmenter  # noqa: F401
+        except ImportError:
+            pytest.skip(
+                "inaSpeechSegmenter not installed; required for segments/preview worker tests"
+            )
 
 
 # --- Helper Functions ---
@@ -101,6 +97,11 @@ def require_ml_dependencies() -> None:
 def cli_script(s: str) -> str:
     """Normalize embedded python -c scripts so they have no leading indentation."""
     return textwrap.dedent(s).lstrip()
+
+
+def py_literal(value: Path | str) -> str:
+    """Return a Python string literal representing the given path/string."""
+    return repr(str(value))
 
 
 def run_cli(script: str, *, timeout: int, label: str) -> subprocess.CompletedProcess:
@@ -122,11 +123,18 @@ def run_cli(script: str, *, timeout: int, label: str) -> subprocess.CompletedPro
         capture_output=True,
         timeout=timeout,
     )
-    assert result.returncode == 0, (
-        f"{label} failed (rc={result.returncode}).\n"
-        f"STDOUT:\n{result.stdout.decode(errors='replace')}\n"
-        f"STDERR:\n{result.stderr.decode(errors='replace')}\n"
-    )
+    if result.returncode != 0:
+        stderr_text = result.stderr.decode(errors="replace")
+        if "No module named 'inaSpeechSegmenter'" in stderr_text:
+            pytest.skip(
+                "inaSpeechSegmenter not installed; required for segments/preview worker tests"
+            )
+        stdout_text = result.stdout.decode(errors="replace")
+        raise AssertionError(
+            f"{label} failed (rc={result.returncode}).\n"
+            f"STDOUT:\n{stdout_text}\n"
+            f"STDERR:\n{stderr_text}\n"
+        )
     return result
 
 
@@ -278,30 +286,30 @@ class TestOfflineCPURun:
 
         # Build the CLI script
         repo_root = Path(__file__).parent.parent
-        script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            # Patch config before importing workers
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+# Patch config before importing workers
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            # Also patch paths module
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+# Also patch paths module
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
-            from services.worker_decode.run import run_decode_worker
+from services.worker_decode.run import run_decode_worker
 
-            result = run_decode_worker("{asset_id}")
-            if result.ok:
-                print(f"SUCCESS: {{result.artifact_path}}")
-                sys.exit(0)
-            else:
-                print(f"FAILED: {{result.error_code}} - {{result.message}}")
-                sys.exit(1)
-        ''')
+result = run_decode_worker({py_literal(asset_id)})
+if result.ok:
+    print(f"SUCCESS: {{result.artifact_path}}")
+    sys.exit(0)
+else:
+    print(f"FAILED: {{result.error_code}} - {{result.message}}")
+    sys.exit(1)
+        """)
 
         result = run_cli(script, timeout=60, label="decode_cli")
         assert b"SUCCESS" in result.stdout
@@ -319,7 +327,7 @@ class TestOfflineCPURun:
     def test_features_worker_cli_runs_offline(self, mvp_test_env, monkeypatch):
         """Features worker runs via CLI and produces HDF5 artifact."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_features=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -327,49 +335,49 @@ class TestOfflineCPURun:
         repo_root = Path(__file__).parent.parent
 
         # First run decode to create normalized.wav
-        decode_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        decode_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
-            from services.worker_decode.run import run_decode_worker
-            result = run_decode_worker("{asset_id}")
-            sys.exit(0 if result.ok else 1)
-        ''')
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker({py_literal(asset_id)})
+sys.exit(0 if result.ok else 1)
+        """)
 
         run_cli(decode_script, timeout=60, label="features_setup_decode")
 
         # Now run features worker
-        features_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        features_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.FEATURES_DIR = Path("{features_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-            app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
 
-            from services.worker_features.run import run_features_worker
-            result = run_features_worker("{asset_id}")
-            if result.ok:
-                print(f"SUCCESS: {{result.artifact_path}}")
-                sys.exit(0)
-            else:
-                print(f"FAILED: {{result.error_code}} - {{result.message}}")
-                sys.exit(1)
-        ''')
+from services.worker_features.run import run_features_worker
+result = run_features_worker({py_literal(asset_id)})
+if result.ok:
+    print(f"SUCCESS: {{result.artifact_path}}")
+    sys.exit(0)
+else:
+    print(f"FAILED: {{result.error_code}} - {{result.message}}")
+    sys.exit(1)
+        """)
 
         result = run_cli(features_script, timeout=120, label="features_cli")
         assert b"SUCCESS" in result.stdout
@@ -386,7 +394,7 @@ class TestOfflineCPURun:
     def test_segments_worker_cli_runs_offline(self, mvp_test_env, monkeypatch):
         """Segments worker runs via CLI and produces segments JSON artifact."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_segments=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -394,49 +402,49 @@ class TestOfflineCPURun:
         repo_root = Path(__file__).parent.parent
 
         # First run decode to create normalized.wav
-        decode_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        decode_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
-            from services.worker_decode.run import run_decode_worker
-            result = run_decode_worker("{asset_id}")
-            sys.exit(0 if result.ok else 1)
-        ''')
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker({py_literal(asset_id)})
+sys.exit(0 if result.ok else 1)
+        """)
 
         run_cli(decode_script, timeout=60, label="segments_setup_decode")
 
         # Now run segments worker
-        segments_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        segments_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.SEGMENTS_DIR = Path("{segments_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-            app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
 
-            from services.worker_segments.run import run_segments_worker
-            result = run_segments_worker("{asset_id}")
-            if result.ok:
-                print(f"SUCCESS: {{result.artifact_path}}")
-                sys.exit(0)
-            else:
-                print(f"FAILED: {{result.error_code}} - {{result.message}}")
-                sys.exit(1)
-        ''')
+from services.worker_segments.run import run_segments_worker
+result = run_segments_worker({py_literal(asset_id)})
+if result.ok:
+    print(f"SUCCESS: {{result.artifact_path}}")
+    sys.exit(0)
+else:
+    print(f"FAILED: {{result.error_code}} - {{result.message}}")
+    sys.exit(1)
+        """)
 
         result = run_cli(segments_script, timeout=120, label="segments_cli")
         assert b"SUCCESS" in result.stdout
@@ -448,7 +456,7 @@ class TestOfflineCPURun:
     def test_preview_worker_cli_runs_offline(self, mvp_test_env, monkeypatch):
         """Preview worker runs via CLI and produces preview JSON artifact."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_features=True, needs_segments=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -458,97 +466,97 @@ class TestOfflineCPURun:
         repo_root = Path(__file__).parent.parent
 
         # First run decode to create normalized.wav
-        decode_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        decode_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
-            from services.worker_decode.run import run_decode_worker
-            result = run_decode_worker("{asset_id}")
-            sys.exit(0 if result.ok else 1)
-        ''')
+from services.worker_decode.run import run_decode_worker
+result = run_decode_worker({py_literal(asset_id)})
+sys.exit(0 if result.ok else 1)
+        """)
 
         run_cli(decode_script, timeout=60, label="preview_setup_decode")
 
         # Run features worker (required by preview)
-        features_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        features_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.FEATURES_DIR = Path("{features_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-            app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
 
-            from services.worker_features.run import run_features_worker
-            result = run_features_worker("{asset_id}")
-            sys.exit(0 if result.ok else 1)
-        ''')
+from services.worker_features.run import run_features_worker
+result = run_features_worker({py_literal(asset_id)})
+sys.exit(0 if result.ok else 1)
+        """)
 
         run_cli(features_script, timeout=120, label="preview_setup_features")
 
         # Run segments worker (required by preview)
-        segments_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        segments_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.SEGMENTS_DIR = Path("{segments_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-            app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
 
-            from services.worker_segments.run import run_segments_worker
-            result = run_segments_worker("{asset_id}")
-            sys.exit(0 if result.ok else 1)
-        ''')
+from services.worker_segments.run import run_segments_worker
+result = run_segments_worker({py_literal(asset_id)})
+sys.exit(0 if result.ok else 1)
+        """)
 
         run_cli(segments_script, timeout=120, label="preview_setup_segments")
 
         # Now run preview worker
-        preview_script = cli_script(f'''
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, "{repo_root}")
+        preview_script = cli_script(f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {py_literal(repo_root)})
 
-            import app.config
-            app.config.AUDIO_DIR = Path("{audio_dir}")
-            app.config.FEATURES_DIR = Path("{features_dir}")
-            app.config.SEGMENTS_DIR = Path("{segments_dir}")
-            app.config.PREVIEW_DIR = Path("{preview_dir}")
-            app.config.DB_PATH = Path("{db_path}")
+import app.config
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.PREVIEW_DIR = Path({py_literal(preview_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
-            import app.utils.paths
-            app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-            app.utils.paths.FEATURES_DIR = Path("{features_dir}")
-            app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
-            app.utils.paths.PREVIEW_DIR = Path("{preview_dir}")
+import app.utils.paths
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.utils.paths.PREVIEW_DIR = Path({py_literal(preview_dir)})
 
-            from services.worker_preview.run import run_preview_worker
-            result = run_preview_worker("{asset_id}")
-            if result.ok:
-                print(f"SUCCESS: {{result.artifact_path}}")
-                sys.exit(0)
-            else:
-                print(f"FAILED: {{result.error_code}} - {{result.message}}")
-                sys.exit(1)
-        ''')
+from services.worker_preview.run import run_preview_worker
+result = run_preview_worker({py_literal(asset_id)})
+if result.ok:
+    print(f"SUCCESS: {{result.artifact_path}}")
+    sys.exit(0)
+else:
+    print(f"FAILED: {{result.error_code}} - {{result.message}}")
+    sys.exit(1)
+        """)
 
         result = run_cli(preview_script, timeout=120, label="preview_cli")
         assert b"SUCCESS" in result.stdout
@@ -573,22 +581,22 @@ class TestDeterministicArtifacts:
         repo_root = Path(__file__).parent.parent
 
         # Run decode first time
-        script = cli_script(f'''
+        script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(script, timeout=60, label="determinism_decode_first")
 
@@ -624,21 +632,21 @@ class TestJobTelemetry:
         repo_root = Path(__file__).parent.parent
 
         # Run decode and capture metrics
-        script = cli_script(f'''
+        script = cli_script(f"""
 import sys
 import json
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 
 if result.ok:
     # Output metrics as JSON for verification
@@ -651,7 +659,7 @@ if result.ok:
     sys.exit(0)
 else:
     sys.exit(1)
-''')
+        """)
 
         result = run_cli(script, timeout=60, label="decode_metrics_cli")
 
@@ -885,7 +893,7 @@ class TestDeterminismWithHash:
     def test_segments_produces_deterministic_json(self, mvp_test_env, monkeypatch):
         """Running segments twice produces semantically identical JSON."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_segments=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -893,44 +901,44 @@ class TestDeterminismWithHash:
         repo_root = Path(__file__).parent.parent
 
         # Run decode first
-        decode_script = cli_script(f'''
+        decode_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(decode_script, timeout=60, label="decode")
 
         # Run segments first time
-        segments_script = cli_script(f'''
+        segments_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
 
 from services.worker_segments.run import run_segments_worker
-result = run_segments_worker("{asset_id}")
+result = run_segments_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(segments_script, timeout=120, label="segments")
 
@@ -957,7 +965,7 @@ sys.exit(0 if result.ok else 1)
     def test_preview_produces_deterministic_json(self, mvp_test_env, monkeypatch):
         """Running preview twice produces semantically identical JSON."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_features=True, needs_segments=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -967,89 +975,89 @@ sys.exit(0 if result.ok else 1)
         repo_root = Path(__file__).parent.parent
 
         # Run decode
-        decode_script = cli_script(f'''
+        decode_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(decode_script, timeout=60, label="decode")
 
         # Run features
-        features_script = cli_script(f'''
+        features_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
 
 from services.worker_features.run import run_features_worker
-result = run_features_worker("{asset_id}")
+result = run_features_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(features_script, timeout=120, label="features")
 
         # Run segments
-        segments_script = cli_script(f'''
+        segments_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
 
 from services.worker_segments.run import run_segments_worker
-result = run_segments_worker("{asset_id}")
+result = run_segments_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(segments_script, timeout=120, label="segments")
 
         # Run preview first time
-        preview_script = cli_script(f'''
+        preview_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.PREVIEW_DIR = Path("{preview_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.PREVIEW_DIR = Path({py_literal(preview_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
-app.utils.paths.PREVIEW_DIR = Path("{preview_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.utils.paths.PREVIEW_DIR = Path({py_literal(preview_dir)})
 
 from services.worker_preview.run import run_preview_worker
-result = run_preview_worker("{asset_id}")
+result = run_preview_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(preview_script, timeout=120, label="preview")
 
@@ -1076,7 +1084,7 @@ sys.exit(0 if result.ok else 1)
     def test_features_produces_deterministic_hdf5_invariants(self, mvp_test_env, monkeypatch):
         """Running features twice produces HDF5 with identical structure."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_features=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -1084,43 +1092,43 @@ sys.exit(0 if result.ok else 1)
         repo_root = Path(__file__).parent.parent
 
         # Run decode
-        decode_script = cli_script(f'''
+        decode_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(decode_script, timeout=60, label="decode")
 
         # Run features first time
-        features_script = cli_script(f'''
+        features_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
 
 from services.worker_features.run import run_features_worker
-result = run_features_worker("{asset_id}")
+result = run_features_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(features_script, timeout=120, label="features")
 
@@ -1160,7 +1168,7 @@ class TestRuntimeTelemetry:
     def test_features_metrics_contain_required_keys_runtime(self, mvp_test_env, monkeypatch):
         """Features worker writes Section 10 required metrics to DB."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_features=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -1168,43 +1176,43 @@ class TestRuntimeTelemetry:
         repo_root = Path(__file__).parent.parent
 
         # Run decode first
-        decode_script = cli_script(f'''
+        decode_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(decode_script, timeout=60, label="decode")
 
         # Run features worker
-        features_script = cli_script(f'''
+        features_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
 
 from services.worker_features.run import run_features_worker
-result = run_features_worker("{asset_id}")
+result = run_features_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(features_script, timeout=120, label="features")
 
@@ -1226,7 +1234,7 @@ sys.exit(0 if result.ok else 1)
     def test_segments_metrics_contain_required_keys_runtime(self, mvp_test_env, monkeypatch):
         """Segments worker writes Section 10 required metrics to DB."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_segments=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -1234,43 +1242,43 @@ sys.exit(0 if result.ok else 1)
         repo_root = Path(__file__).parent.parent
 
         # Run decode first
-        decode_script = cli_script(f'''
+        decode_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(decode_script, timeout=60, label="decode")
 
         # Run segments worker
-        segments_script = cli_script(f'''
+        segments_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
 
 from services.worker_segments.run import run_segments_worker
-result = run_segments_worker("{asset_id}")
+result = run_segments_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(segments_script, timeout=120, label="segments")
 
@@ -1285,7 +1293,7 @@ sys.exit(0 if result.ok else 1)
     def test_preview_metrics_contain_required_keys_runtime(self, mvp_test_env, monkeypatch):
         """Preview worker writes Section 10 required metrics to DB."""
         require_ffmpeg()
-        require_ml_dependencies()
+        require_ml_dependencies(needs_features=True, needs_segments=True)
         tmpdir, asset_id, db_path, SessionFactory = mvp_test_env
 
         audio_dir = tmpdir / "data" / "audio"
@@ -1295,89 +1303,89 @@ sys.exit(0 if result.ok else 1)
         repo_root = Path(__file__).parent.parent
 
         # Run decode
-        decode_script = cli_script(f'''
+        decode_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
 
 from services.worker_decode.run import run_decode_worker
-result = run_decode_worker("{asset_id}")
+result = run_decode_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(decode_script, timeout=60, label="decode")
 
         # Run features
-        features_script = cli_script(f'''
+        features_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
 
 from services.worker_features.run import run_features_worker
-result = run_features_worker("{asset_id}")
+result = run_features_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(features_script, timeout=120, label="features")
 
         # Run segments
-        segments_script = cli_script(f'''
+        segments_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
 
 from services.worker_segments.run import run_segments_worker
-result = run_segments_worker("{asset_id}")
+result = run_segments_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
         run_cli(segments_script, timeout=120, label="segments")
 
         # Run preview worker
-        preview_script = cli_script(f'''
+        preview_script = cli_script(f"""
 import sys
 from pathlib import Path
-sys.path.insert(0, "{repo_root}")
+sys.path.insert(0, {py_literal(repo_root)})
 
 import app.config
-app.config.AUDIO_DIR = Path("{audio_dir}")
-app.config.FEATURES_DIR = Path("{features_dir}")
-app.config.SEGMENTS_DIR = Path("{segments_dir}")
-app.config.PREVIEW_DIR = Path("{preview_dir}")
-app.config.DB_PATH = Path("{db_path}")
+app.config.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.config.FEATURES_DIR = Path({py_literal(features_dir)})
+app.config.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.config.PREVIEW_DIR = Path({py_literal(preview_dir)})
+app.config.DB_PATH = Path({py_literal(db_path)})
 
 import app.utils.paths
-app.utils.paths.AUDIO_DIR = Path("{audio_dir}")
-app.utils.paths.FEATURES_DIR = Path("{features_dir}")
-app.utils.paths.SEGMENTS_DIR = Path("{segments_dir}")
-app.utils.paths.PREVIEW_DIR = Path("{preview_dir}")
+app.utils.paths.AUDIO_DIR = Path({py_literal(audio_dir)})
+app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
+app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
+app.utils.paths.PREVIEW_DIR = Path({py_literal(preview_dir)})
 
 from services.worker_preview.run import run_preview_worker
-result = run_preview_worker("{asset_id}")
+result = run_preview_worker({py_literal(asset_id)})
 sys.exit(0 if result.ok else 1)
-''')
+        """)
 
         run_cli(preview_script, timeout=120, label="preview")
 
