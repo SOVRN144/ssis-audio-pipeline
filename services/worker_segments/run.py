@@ -72,6 +72,21 @@ class SegmentsErrorCode(str, Enum):
     SEGMENTS_INVALID = "SEGMENTS_INVALID"
 
 
+def _looks_like_oom(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    tokens = [
+        "out of memory",
+        "oom",
+        "allocate memory",
+        "cannot allocate memory",
+        "failed to allocate",
+        "malloc",
+        "cuda out of memory",
+        "metal out of memory",
+    ]
+    return any(tok in message for tok in tokens)
+
+
 # --- Result Types ---
 
 
@@ -728,20 +743,99 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
             message=f"Normalized WAV not found: {input_path}",
         )
 
-    # --- Get audio duration ---
     try:
         total_duration = _get_audio_duration(input_path)
-    except Exception as e:
-        logger.error("Failed to read audio duration for asset_id=%s: %s", asset_id, e)
-        return SegmentsResult(
-            ok=False,
-            error_code=SegmentsErrorCode.SEGMENTATION_FAILED.value,
-            message=f"Failed to read audio duration: {e}",
+        raw_segments = _run_segmenter(input_path)
+
+        segments = []
+        for label, start, end in raw_segments:
+            mapped_label = _map_label(label)
+            confidence = CONFIDENCE_BASE.get(mapped_label, 0.70)
+            segments.append(
+                SegmentData(
+                    label=mapped_label,
+                    start_sec=start,
+                    end_sec=end,
+                    confidence=confidence,
+                    source=SEGMENT_SOURCE,
+                )
+            )
+
+        segments = _postprocess_segments(segments, total_duration)
+
+        valid, error_msg = _validate_invariants(segments, total_duration)
+        if not valid:
+            logger.error(
+                "Segment invariants validation failed for asset_id=%s: %s",
+                asset_id,
+                error_msg,
+            )
+            return SegmentsResult(
+                ok=False,
+                error_code=SegmentsErrorCode.SEGMENTS_INVALID.value,
+                message=f"Segment invariants validation failed: {error_msg}",
+            )
+
+        computed_at = datetime.now(UTC).isoformat()
+        output_data = {
+            "schema_id": SEGMENTS_SCHEMA_ID,
+            "version": SEGMENTS_VERSION,
+            "asset_id": asset_id,
+            "computed_at": computed_at,
+            "confidence_type": CONFIDENCE_TYPE,
+            "segments": [
+                {
+                    "label": seg.label,
+                    "start_sec": seg.start_sec,
+                    "end_sec": seg.end_sec,
+                    "confidence": seg.confidence,
+                    "source": seg.source,
+                }
+                for seg in segments
+            ],
+        }
+
+        valid, error_msg = _validate_schema(output_data)
+        if not valid:
+            logger.error("Schema validation failed for asset_id=%s: %s", asset_id, error_msg)
+            return SegmentsResult(
+                ok=False,
+                error_code=SegmentsErrorCode.SEGMENTS_INVALID.value,
+                message=f"Schema validation failed: {error_msg}",
+            )
+
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            json_text = json.dumps(output_data, indent=2)
+            atomic_write_text(output_path, json_text)
+        except Exception as e:
+            logger.error("Failed to write segments JSON for asset_id=%s: %s", asset_id, e)
+            return SegmentsResult(
+                ok=False,
+                error_code=SegmentsErrorCode.SEGMENTATION_FAILED.value,
+                message=f"Failed to write segments JSON: {e}",
+            )
+
+        segmentation_time_ms = int((time.monotonic() - start_time) * 1000)
+        metrics = _compute_metrics(segments, total_duration, segmentation_time_ms)
+
+        logger.info(
+            "Segments computed for asset_id=%s: %d segments, %.2fs total, %dms",
+            asset_id,
+            len(segments),
+            total_duration,
+            segmentation_time_ms,
         )
 
-    # --- Run segmentation ---
-    try:
-        raw_segments = _run_segmenter(input_path)
+        return SegmentsResult(
+            ok=True,
+            message="Segmentation completed successfully",
+            metrics=metrics,
+            artifact_path=str(output_path),
+            artifact_type=ARTIFACT_TYPE_SEGMENTS_V1,
+            schema_version=SEGMENTS_VERSION,
+            segments=segments,
+        )
     except MemoryError:
         logger.error("OOM during segmentation for asset_id=%s", asset_id)
         return SegmentsResult(
@@ -749,121 +843,34 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
             error_code=SegmentsErrorCode.MODEL_OOM.value,
             message="Out of memory during segmentation",
         )
-    except Exception as e:
-        error_str = str(e).lower()
-        # Check for memory-related errors
-        if "memory" in error_str or "oom" in error_str or "alloc" in error_str:
-            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, e)
+    except RuntimeError as exc:
+        if _looks_like_oom(exc):
+            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
             return SegmentsResult(
                 ok=False,
                 error_code=SegmentsErrorCode.MODEL_OOM.value,
-                message=f"Out of memory during segmentation: {e}",
+                message=f"Out of memory during segmentation: {exc}",
             )
-        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, e)
+        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
         return SegmentsResult(
             ok=False,
             error_code=SegmentsErrorCode.SEGMENTATION_FAILED.value,
-            message=f"Segmentation failed: {e}",
+            message=f"Segmentation failed: {exc}",
         )
-
-    # --- Map labels and create SegmentData ---
-    segments = []
-    for label, start, end in raw_segments:
-        mapped_label = _map_label(label)
-        confidence = CONFIDENCE_BASE.get(mapped_label, 0.70)
-        segments.append(
-            SegmentData(
-                label=mapped_label,
-                start_sec=start,
-                end_sec=end,
-                confidence=confidence,
-                source=SEGMENT_SOURCE,
+    except Exception as exc:
+        if _looks_like_oom(exc):
+            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
+            return SegmentsResult(
+                ok=False,
+                error_code=SegmentsErrorCode.MODEL_OOM.value,
+                message=f"Out of memory during segmentation: {exc}",
             )
-        )
-
-    # --- Post-process segments ---
-    segments = _postprocess_segments(segments, total_duration)
-
-    # --- Validate invariants (including bounds check) ---
-    valid, error_msg = _validate_invariants(segments, total_duration)
-    if not valid:
-        logger.error(
-            "Segment invariants validation failed for asset_id=%s: %s", asset_id, error_msg
-        )
-        return SegmentsResult(
-            ok=False,
-            error_code=SegmentsErrorCode.SEGMENTS_INVALID.value,
-            message=f"Segment invariants validation failed: {error_msg}",
-        )
-
-    # --- Build output data ---
-    computed_at = datetime.now(UTC).isoformat()
-
-    output_data = {
-        "schema_id": SEGMENTS_SCHEMA_ID,
-        "version": SEGMENTS_VERSION,
-        "asset_id": asset_id,
-        "computed_at": computed_at,
-        "confidence_type": CONFIDENCE_TYPE,
-        "segments": [
-            {
-                "label": seg.label,
-                "start_sec": seg.start_sec,
-                "end_sec": seg.end_sec,
-                "confidence": seg.confidence,
-                "source": seg.source,
-            }
-            for seg in segments
-        ],
-    }
-
-    # --- Validate schema ---
-    valid, error_msg = _validate_schema(output_data)
-    if not valid:
-        logger.error("Schema validation failed for asset_id=%s: %s", asset_id, error_msg)
-        return SegmentsResult(
-            ok=False,
-            error_code=SegmentsErrorCode.SEGMENTS_INVALID.value,
-            message=f"Schema validation failed: {error_msg}",
-        )
-
-    # --- Atomic publish ---
-    try:
-        # Ensure parent directory exists
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write atomically
-        json_text = json.dumps(output_data, indent=2)
-        atomic_write_text(output_path, json_text)
-    except Exception as e:
-        logger.error("Failed to write segments JSON for asset_id=%s: %s", asset_id, e)
+        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
         return SegmentsResult(
             ok=False,
             error_code=SegmentsErrorCode.SEGMENTATION_FAILED.value,
-            message=f"Failed to write segments JSON: {e}",
+            message=f"Segmentation failed: {exc}",
         )
-
-    # --- Success ---
-    segmentation_time_ms = int((time.monotonic() - start_time) * 1000)
-    metrics = _compute_metrics(segments, total_duration, segmentation_time_ms)
-
-    logger.info(
-        "Segments computed for asset_id=%s: %d segments, %.2fs total, %dms",
-        asset_id,
-        len(segments),
-        total_duration,
-        segmentation_time_ms,
-    )
-
-    return SegmentsResult(
-        ok=True,
-        message="Segmentation completed successfully",
-        metrics=metrics,
-        artifact_path=str(output_path),
-        artifact_type=ARTIFACT_TYPE_SEGMENTS_V1,
-        schema_version=SEGMENTS_VERSION,
-        segments=segments,
-    )
 
 
 # --- Standalone Execution ---
