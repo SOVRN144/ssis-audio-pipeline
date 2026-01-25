@@ -115,6 +115,10 @@ ruff format .
 mypy app/ services/
 ```
 
+## Running the System
+
+See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full operator manual covering prerequisites, end-to-end worker runs, troubleshooting, and CI parity guidance.
+
 ### Optional: Global git ignore for macOS/editor artifacts
 
 1. Copy the repo file to a global ignore location:
