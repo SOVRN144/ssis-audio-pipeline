@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -72,19 +73,15 @@ class SegmentsErrorCode(str, Enum):
     SEGMENTS_INVALID = "SEGMENTS_INVALID"
 
 
-def _looks_like_oom(exc: BaseException) -> bool:
-    message = str(exc).lower()
-    tokens = [
-        "out of memory",
-        "oom",
-        "allocate memory",
-        "cannot allocate memory",
-        "failed to allocate",
-        "malloc",
-        "cuda out of memory",
-        "metal out of memory",
-    ]
-    return any(tok in message for tok in tokens)
+OOM_ERROR_RE = re.compile(
+    r"(?:out of memory|\boom\b|allocate memory|cannot allocate memory|failed to allocate|malloc|cuda out of memory|metal out of memory)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_oom(exc: BaseException | str) -> bool:
+    message = str(exc)
+    return bool(OOM_ERROR_RE.search(message))
 
 
 # --- Result Types ---
@@ -113,6 +110,24 @@ class SegmentsResult:
     artifact_type: str | None = None
     schema_version: str | None = None
     segments: list[SegmentData] = field(default_factory=list)
+
+
+def _error_result(
+    asset_id: str,
+    exc: BaseException | str | None,
+    code: str,
+    prefix: str,
+) -> SegmentsResult:
+    """Construct a standardized error result for the segments worker."""
+
+    message = f"{prefix} for asset_id={asset_id}"
+    if exc:
+        message = f"{message}: {exc}"
+    return SegmentsResult(
+        ok=False,
+        error_code=code,
+        message=message,
+    )
 
 
 # --- Research Pack Thresholds (Blueprint section 11) ---
@@ -737,16 +752,68 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
     # --- Input validation ---
     if not input_path.exists():
         logger.error("Normalized WAV not found for asset_id=%s: %s", asset_id, input_path)
-        return SegmentsResult(
-            ok=False,
-            error_code=SegmentsErrorCode.INPUT_NOT_FOUND.value,
-            message=f"Normalized WAV not found: {input_path}",
+        return _error_result(
+            asset_id,
+            f"path={input_path}",
+            SegmentsErrorCode.INPUT_NOT_FOUND.value,
+            "Normalized WAV not found",
         )
 
     try:
         total_duration = _get_audio_duration(input_path)
-        raw_segments = _run_segmenter(input_path)
+    except Exception as exc:
+        logger.error("Failed to read normalized WAV for asset_id=%s: %s", asset_id, exc)
+        return _error_result(
+            asset_id,
+            exc,
+            SegmentsErrorCode.SEGMENTATION_FAILED.value,
+            "Failed to read normalized WAV",
+        )
 
+    try:
+        raw_segments = _run_segmenter(input_path)
+    except MemoryError as exc:
+        logger.error("OOM during segmentation for asset_id=%s", asset_id)
+        return _error_result(
+            asset_id,
+            exc,
+            SegmentsErrorCode.MODEL_OOM.value,
+            "Out of memory during segmentation",
+        )
+    except RuntimeError as exc:
+        if _looks_like_oom(exc):
+            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
+            return _error_result(
+                asset_id,
+                exc,
+                SegmentsErrorCode.MODEL_OOM.value,
+                "Out of memory during segmentation",
+            )
+        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
+        return _error_result(
+            asset_id,
+            exc,
+            SegmentsErrorCode.SEGMENTATION_FAILED.value,
+            "Segmentation failed",
+        )
+    except Exception as exc:
+        if _looks_like_oom(exc):
+            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
+            return _error_result(
+                asset_id,
+                exc,
+                SegmentsErrorCode.MODEL_OOM.value,
+                "Out of memory during segmentation",
+            )
+        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
+        return _error_result(
+            asset_id,
+            exc,
+            SegmentsErrorCode.SEGMENTATION_FAILED.value,
+            "Segmentation failed",
+        )
+
+    try:
         segments = []
         for label, start, end in raw_segments:
             mapped_label = _map_label(label)
@@ -770,10 +837,11 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
                 asset_id,
                 error_msg,
             )
-            return SegmentsResult(
-                ok=False,
-                error_code=SegmentsErrorCode.SEGMENTS_INVALID.value,
-                message=f"Segment invariants validation failed: {error_msg}",
+            return _error_result(
+                asset_id,
+                error_msg,
+                SegmentsErrorCode.SEGMENTS_INVALID.value,
+                "Segment invariants validation failed",
             )
 
         computed_at = datetime.now(UTC).isoformat()
@@ -798,22 +866,24 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
         valid, error_msg = _validate_schema(output_data)
         if not valid:
             logger.error("Schema validation failed for asset_id=%s: %s", asset_id, error_msg)
-            return SegmentsResult(
-                ok=False,
-                error_code=SegmentsErrorCode.SEGMENTS_INVALID.value,
-                message=f"Schema validation failed: {error_msg}",
+            return _error_result(
+                asset_id,
+                error_msg,
+                SegmentsErrorCode.SEGMENTS_INVALID.value,
+                "Schema validation failed",
             )
 
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             json_text = json.dumps(output_data, indent=2)
             atomic_write_text(output_path, json_text)
-        except Exception as e:
-            logger.error("Failed to write segments JSON for asset_id=%s: %s", asset_id, e)
-            return SegmentsResult(
-                ok=False,
-                error_code=SegmentsErrorCode.SEGMENTATION_FAILED.value,
-                message=f"Failed to write segments JSON: {e}",
+        except Exception as exc:
+            logger.error("Failed to write segments JSON for asset_id=%s: %s", asset_id, exc)
+            return _error_result(
+                asset_id,
+                exc,
+                SegmentsErrorCode.SEGMENTATION_FAILED.value,
+                "Failed to write segments JSON",
             )
 
         segmentation_time_ms = int((time.monotonic() - start_time) * 1000)
@@ -836,40 +906,37 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
             schema_version=SEGMENTS_VERSION,
             segments=segments,
         )
-    except MemoryError:
-        logger.error("OOM during segmentation for asset_id=%s", asset_id)
-        return SegmentsResult(
-            ok=False,
-            error_code=SegmentsErrorCode.MODEL_OOM.value,
-            message="Out of memory during segmentation",
-        )
-    except RuntimeError as exc:
-        if _looks_like_oom(exc):
-            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
-            return SegmentsResult(
-                ok=False,
-                error_code=SegmentsErrorCode.MODEL_OOM.value,
-                message=f"Out of memory during segmentation: {exc}",
-            )
-        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
-        return SegmentsResult(
-            ok=False,
-            error_code=SegmentsErrorCode.SEGMENTATION_FAILED.value,
-            message=f"Segmentation failed: {exc}",
+    except MemoryError as exc:
+        logger.error("OOM after segmentation for asset_id=%s: %s", asset_id, exc)
+        return _error_result(
+            asset_id,
+            exc,
+            SegmentsErrorCode.MODEL_OOM.value,
+            "Out of memory during segmentation",
         )
     except Exception as exc:
         if _looks_like_oom(exc):
-            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
-            return SegmentsResult(
-                ok=False,
-                error_code=SegmentsErrorCode.MODEL_OOM.value,
-                message=f"Out of memory during segmentation: {exc}",
+            logger.error(
+                "OOM-like error after segmentation for asset_id=%s: %s",
+                asset_id,
+                exc,
             )
-        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
-        return SegmentsResult(
-            ok=False,
-            error_code=SegmentsErrorCode.SEGMENTATION_FAILED.value,
-            message=f"Segmentation failed: {exc}",
+            return _error_result(
+                asset_id,
+                exc,
+                SegmentsErrorCode.MODEL_OOM.value,
+                "Out of memory during segmentation",
+            )
+        logger.error(
+            "Segmentation failed for asset_id=%s during post-processing: %s",
+            asset_id,
+            exc,
+        )
+        return _error_result(
+            asset_id,
+            exc,
+            SegmentsErrorCode.SEGMENTATION_FAILED.value,
+            "Segmentation failed",
         )
 
 
