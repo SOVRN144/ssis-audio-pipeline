@@ -86,6 +86,16 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
 
+#### TensorFlow/Keras Verification
+
+TensorFlow and Keras install with the base dependencies, so after running `pip install -e ".[dev]"` inside the virtual environment, verify the pinned versions with:
+
+```bash
+.venv/bin/python -c "import tensorflow as tf; import keras; print(tf.__version__); print(keras.__version__)"
+```
+
+Expected output should report `2.15.1` for TensorFlow and `2.15.0` for Keras. This guards against accidental upgrades to TensorFlow 2.20+ / Keras 3.x.
+
 ### Running Tests
 
 ```bash
