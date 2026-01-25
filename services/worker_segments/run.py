@@ -73,10 +73,17 @@ class SegmentsErrorCode(str, Enum):
     SEGMENTS_INVALID = "SEGMENTS_INVALID"
 
 
-OOM_ERROR_RE = re.compile(
-    r"(?:out of memory|\boom\b|allocate memory|cannot allocate memory|failed to allocate|malloc|cuda out of memory|metal out of memory)",
-    re.IGNORECASE,
+OOM_ERROR_PATTERN = (
+    r"(?:out of memory|"
+    r"\boom\b|"
+    r"allocate memory|"
+    r"cannot allocate memory|"
+    r"failed to allocate|"
+    r"malloc|"
+    r"cuda out of memory|"
+    r"metal out of memory)"
 )
+OOM_ERROR_RE = re.compile(OOM_ERROR_PATTERN, re.IGNORECASE)
 
 
 def _looks_like_oom(exc: BaseException | str) -> bool:
