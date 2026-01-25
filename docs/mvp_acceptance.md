@@ -59,14 +59,31 @@ you can prepare a local environment as follows:
    python scripts/fetch_yamnet_onnx.py --force
    ```
 
-   > **Note:** the repository currently ships a placeholder SHA. Publish the
-   > official yamnet.onnx binary, compute `sha256sum yamnet.onnx`, update the
-   > `.sha256` file with that 64-character digest, and then rerun the script.
+   > **Note:** If you override `YAMNET_ONNX_DOWNLOAD_URL`, update
+   > `services/worker_features/yamnet_onnx/yamnet.onnx.sha256` with the new
+   > asset’s 64-character SHA-256 before rerunning the script.
 
 3. The segments worker uses `inaSpeechSegmenter`, which downloads its acoustic
-   models on first run into `~/.cache/inaSpeechSegmenter`. A future `ci-ml`
-   workflow can either pre-seed that cache or allow outbound network access
-   for the initial download.
+   models on first run into `~/.cache/inaSpeechSegmenter`. The `ci-ml`
+   workflow restores/caches this directory so the first run does not need to
+   download all models repeatedly.
+
+### ML CI Coverage
+
+- [`ci-ml.yml`](../.github/workflows/ci-ml.yml) runs nightly at 08:00 UTC and can
+  also be triggered manually. It installs the `ml` extra, ensures ffmpeg is
+  available, fetches `yamnet.onnx` from the
+  [yamnet-v1 assets release](https://github.com/SOVRN144/ssis-audio-pipeline-assets/releases/tag/yamnet-v1),
+  restores `inaSpeechSegmenter` caches, and executes
+  `pytest tests/test_mvp_acceptance.py -rs` so the previously skipped ML tests
+  become signal.
+- Local run mirrors the workflow:
+
+  ```bash
+  pip install -e ".[dev,ml]"
+  python scripts/fetch_yamnet_onnx.py --force
+  pytest tests/test_mvp_acceptance.py -rs
+  ```
 
 ## Expected Artifact Locations
 
