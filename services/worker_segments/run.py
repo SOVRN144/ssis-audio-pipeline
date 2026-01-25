@@ -803,7 +803,7 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
     segmenter_fn = _resolve_segmenter_callable()
     try:
         raw_segments = segmenter_fn(input_path)
-    except BaseException as exc:  # pragma: no cover - exercised via tests
+    except Exception as exc:  # pragma: no cover - exercised via tests
         error_code = _map_exception_to_error_code(exc)
         prefix = (
             "Out of memory during segmentation"
