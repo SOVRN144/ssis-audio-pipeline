@@ -36,6 +36,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from app.orchestrator import (
     ARTIFACT_TYPE_SEGMENTS_V1,
     SEGMENTS_SCHEMA_ID,
@@ -46,6 +48,13 @@ from app.utils.atomic_io import atomic_write_text
 from app.utils.paths import audio_normalized_path, segments_json_path
 
 logger = logging.getLogger(__name__)
+
+# --- Legacy dependency compatibility ---
+# inaSpeechSegmenter still references the deprecated `np.int` alias. NumPy removed
+# this attribute in 1.24+, so define it on import to keep the third-party module
+# functioning without downgrading NumPy.
+if not hasattr(np, "int"):
+    np.int = int  # type: ignore[attr-defined]
 
 # Stage identifier for this worker (imported from orchestrator for consistency)
 WORKER_STAGE = STAGE_SEGMENTS
