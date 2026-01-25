@@ -19,6 +19,7 @@ import tempfile
 import textwrap
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,13 +64,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def download(url: str, dest: Path) -> None:
+def download(url: str, dest: Path, timeout: float = 30.0) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url) as response, dest.open("wb") as fh:
+    with urllib.request.urlopen(url, timeout=timeout) as response, dest.open("wb") as fh:
         shutil.copyfileobj(response, fh)
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fetch yamnet.onnx with sha verification")
     parser.add_argument(
         "--force",
@@ -82,9 +83,15 @@ def main() -> None:
         default=TARGET_PATH,
         help=f"Destination path (default: {TARGET_PATH})",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    expected_hash = read_expected_hash()
+    try:
+        expected_hash = read_expected_hash()
+    except SystemExit as exc:  # pragma: no cover - helper tested separately
+        message = exc.code if isinstance(exc.code, str) else str(exc)
+        if message:
+            print(message, file=sys.stderr)
+        return _exit_code(exc)
     output_path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -92,12 +99,12 @@ def main() -> None:
         current = sha256_file(output_path)
         if current == expected_hash:
             print(f"yamnet.onnx already present at {output_path}")
-            return
+            return 0
         print(
             "Existing yamnet.onnx hash does not match expected value; use --force to replace.",
             file=sys.stderr,
         )
-        return
+        return 1
 
     url = os.environ.get("YAMNET_ONNX_DOWNLOAD_URL", DEFAULT_URL)
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".onnx")
@@ -108,24 +115,38 @@ def main() -> None:
         download(url, tmp_file)
     except urllib.error.HTTPError as exc:  # pragma: no cover - network failures
         tmp_file.unlink(missing_ok=True)
-        raise SystemExit(
-            f"Failed to download yamnet.onnx ({exc.code} {exc.reason}): {url}"
-        ) from exc
+        print(
+            f"Failed to download yamnet.onnx ({exc.code} {exc.reason}): {url}",
+            file=sys.stderr,
+        )
+        return 1
     except urllib.error.URLError as exc:  # pragma: no cover - network failures
         tmp_file.unlink(missing_ok=True)
-        raise SystemExit(f"Failed to download yamnet.onnx: {exc}") from exc
+        print(f"Failed to download yamnet.onnx: {exc}", file=sys.stderr)
+        return 1
 
     actual_hash = sha256_file(tmp_file)
     if actual_hash != expected_hash:
         tmp_file.unlink(missing_ok=True)
-        raise SystemExit(
+        print(
             "Hash mismatch for downloaded yamnet.onnx (expected "
-            f"{expected_hash}, got {actual_hash})."
+            f"{expected_hash}, got {actual_hash}).",
+            file=sys.stderr,
         )
+        return 1
 
     shutil.move(str(tmp_file), output_path)
     print(f"Saved yamnet.onnx to {output_path}")
+    return 0
+
+
+def _exit_code(exc: SystemExit) -> int:
+    code = exc.code
+    if isinstance(code, int):
+        return code
+    return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
