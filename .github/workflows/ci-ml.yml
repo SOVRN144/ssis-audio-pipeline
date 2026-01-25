@@ -1,0 +1,45 @@
+name: CI ML
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'
+
+jobs:
+  ml-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,ml]"
+
+      - name: Cache inaSpeechSegmenter models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/inaSpeechSegmenter
+          key: inaSpeech-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Fetch YamNet ONNX
+        run: python scripts/fetch_yamnet_onnx.py --force
+
+      - name: Run ML acceptance tests
+        env:
+          PYTEST_ADDOPTS: -rs
+        run: |
+          pytest tests/test_mvp_acceptance.py

@@ -3,9 +3,9 @@
 
 The script fetches the model from a pinned URL, verifies the sha256 recorded
 in services/worker_features/yamnet_onnx/yamnet.onnx.sha256, and writes the
-artifact as yamnet.onnx. The default URL points at a future GitHub Release
-asset; replace it (or export YAMNET_ONNX_DOWNLOAD_URL) once the asset is
-published.
+artifact as yamnet.onnx. The default URL points at the
+ssis-audio-pipeline-assets `yamnet-v1` release, but you can override it by
+exporting YAMNET_ONNX_DOWNLOAD_URL.
 """
 
 from __future__ import annotations
