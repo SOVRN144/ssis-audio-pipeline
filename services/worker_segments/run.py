@@ -30,12 +30,14 @@ import json
 import logging
 import math
 import re
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -734,6 +736,17 @@ def _run_segmenter(wav_path: Path) -> list[tuple[str, float, float]]:
     return result
 
 
+def _resolve_segmenter_callable() -> Callable[[Path], list[tuple[str, float, float]]]:
+    """Return the segmenter callable, preferring the module tests patch."""
+
+    patched_mod = sys.modules.get("services.worker_segments.run")
+    if patched_mod is not None:
+        seg = getattr(patched_mod, "_run_segmenter", None)
+        if callable(seg):
+            return cast(Callable[[Path], list[tuple[str, float, float]]], seg)
+    return _run_segmenter
+
+
 def run_segments_worker(asset_id: str) -> SegmentsResult:
     """Run the segments worker for an asset.
 
@@ -787,8 +800,9 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
             "Failed to read normalized WAV",
         )
 
+    segmenter_fn = _resolve_segmenter_callable()
     try:
-        raw_segments = _run_segmenter(input_path)
+        raw_segments = segmenter_fn(input_path)
     except BaseException as exc:  # pragma: no cover - exercised via tests
         error_code = _map_exception_to_error_code(exc)
         prefix = (
