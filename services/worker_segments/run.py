@@ -91,6 +91,16 @@ def _looks_like_oom(exc: BaseException | str) -> bool:
     return bool(OOM_ERROR_RE.search(message))
 
 
+def _map_exception_to_error_code(exc: BaseException) -> SegmentsErrorCode:
+    """Map exceptions raised by the segmenter to SegmentsErrorCode."""
+
+    if isinstance(exc, MemoryError):
+        return SegmentsErrorCode.MODEL_OOM
+    if _looks_like_oom(exc):
+        return SegmentsErrorCode.MODEL_OOM
+    return SegmentsErrorCode.SEGMENTATION_FAILED
+
+
 # --- Result Types ---
 
 
@@ -779,45 +789,19 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
 
     try:
         raw_segments = _run_segmenter(input_path)
-    except MemoryError as exc:
-        logger.error("OOM during segmentation for asset_id=%s", asset_id)
-        return _error_result(
-            asset_id,
-            exc,
-            SegmentsErrorCode.MODEL_OOM.value,
-            "Out of memory during segmentation",
+    except BaseException as exc:  # pragma: no cover - exercised via tests
+        error_code = _map_exception_to_error_code(exc)
+        prefix = (
+            "Out of memory during segmentation"
+            if error_code == SegmentsErrorCode.MODEL_OOM
+            else "Segmentation failed"
         )
-    except RuntimeError as exc:
-        if _looks_like_oom(exc):
-            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
-            return _error_result(
-                asset_id,
-                exc,
-                SegmentsErrorCode.MODEL_OOM.value,
-                "Out of memory during segmentation",
-            )
-        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
+        logger.exception("Segmentation error for asset_id=%s", asset_id)
         return _error_result(
             asset_id,
             exc,
-            SegmentsErrorCode.SEGMENTATION_FAILED.value,
-            "Segmentation failed",
-        )
-    except Exception as exc:
-        if _looks_like_oom(exc):
-            logger.error("OOM-like error during segmentation for asset_id=%s: %s", asset_id, exc)
-            return _error_result(
-                asset_id,
-                exc,
-                SegmentsErrorCode.MODEL_OOM.value,
-                "Out of memory during segmentation",
-            )
-        logger.error("Segmentation failed for asset_id=%s: %s", asset_id, exc)
-        return _error_result(
-            asset_id,
-            exc,
-            SegmentsErrorCode.SEGMENTATION_FAILED.value,
-            "Segmentation failed",
+            error_code.value,
+            prefix,
         )
 
     try:
