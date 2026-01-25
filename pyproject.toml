@@ -22,11 +22,21 @@ dev = [
     "h5py>=3.10.0",
     "numpy>=1.26.0",
 ]
-features = [
-    "onnxruntime>=1.16.0",
-    "librosa>=0.10.0",
-    "h5py>=3.10.0",
-    "numpy>=1.26.0",
+features-ml = [
+    "onnxruntime>=1.17.0,<2",
+    "librosa>=0.10.0,<0.11",
+    "h5py>=3.10.0,<4",
+    "numpy>=1.26.0,<2",
+]
+segments-ml = [
+    "inaSpeechSegmenter>=0.6.0,<0.7",
+]
+ml = [
+    "onnxruntime>=1.17.0,<2",
+    "librosa>=0.10.0,<0.11",
+    "h5py>=3.10.0,<4",
+    "numpy>=1.26.0,<2",
+    "inaSpeechSegmenter>=0.6.0,<0.7",
 ]
 
 [build-system]

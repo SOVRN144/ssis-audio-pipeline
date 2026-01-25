@@ -35,6 +35,39 @@ pytest tests/test_mvp_acceptance.py::TestDeterministicArtifacts -v
 pytest tests/test_mvp_acceptance.py::TestJobTelemetry -v
 ```
 
+### ML Dependencies & Assets
+
+ML-heavy stages (features, segments, preview) require optional dependencies and
+the YamNet ONNX model. They are intentionally excluded from default CI runs, but
+you can prepare a local environment as follows:
+
+1. Install the optional extras:
+
+   ```bash
+   pip install -e ".[dev,ml]"
+   ```
+
+2. Fetch the YamNet ONNX artifact so the features worker can launch
+   onnxruntime. A helper script is provided, but it requires the future
+   GitHub Release asset hosted at
+   `https://github.com/SOVRN144/ssis-audio-pipeline-assets/releases/download/yamnet-v1/yamnet.onnx`
+   (or a custom URL via `YAMNET_ONNX_DOWNLOAD_URL`). It also verifies the
+   sha256 recorded in
+   `services/worker_features/yamnet_onnx/yamnet.onnx.sha256`.
+
+   ```bash
+   python scripts/fetch_yamnet_onnx.py --force
+   ```
+
+   > **Note:** the repository currently ships a placeholder SHA. Publish the
+   > official yamnet.onnx binary, compute `sha256sum yamnet.onnx`, update the
+   > `.sha256` file with that 64-character digest, and then rerun the script.
+
+3. The segments worker uses `inaSpeechSegmenter`, which downloads its acoustic
+   models on first run into `~/.cache/inaSpeechSegmenter`. A future `ci-ml`
+   workflow can either pre-seed that cache or allow outbound network access
+   for the initial download.
+
 ## Expected Artifact Locations
 
 Per Blueprint Section 4, artifacts are stored at these canonical paths:
