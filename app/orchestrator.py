@@ -47,7 +47,7 @@ from app.config import (
     RETRY_DELAYS_SECONDS,
 )
 from app.db import create_stage_lock, init_db
-from app.models import ArtifactIndex, FeatureSpec, PipelineJob, StageLock, utc_now
+from app.models import ArtifactIndex, PipelineJob, StageLock, utc_now
 from app.utils.hashing import feature_spec_alias as compute_feature_spec_alias
 from app.utils.paths import (
     audio_normalized_path,

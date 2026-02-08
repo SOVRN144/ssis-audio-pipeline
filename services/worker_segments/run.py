@@ -35,7 +35,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
@@ -66,7 +66,7 @@ WORKER_STAGE = STAGE_SEGMENTS
 # --- Error Codes ---
 
 
-class SegmentsErrorCode(str, Enum):
+class SegmentsErrorCode(StrEnum):
     """Error codes for segments stage per Blueprint section 8."""
 
     INPUT_NOT_FOUND = "INPUT_NOT_FOUND"

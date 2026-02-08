@@ -524,12 +524,17 @@ final_path.parent.mkdir(parents=True, exist_ok=True)
 
 conn = sqlite3.connect(db_path)
 conn.execute(
-    "CREATE TABLE IF NOT EXISTS pipeline_jobs (stage TEXT PRIMARY KEY, status TEXT NOT NULL, attempt INTEGER NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS pipeline_jobs ("
+    "stage TEXT PRIMARY KEY, status TEXT NOT NULL, attempt INTEGER NOT NULL)"
 )
 conn.execute(
-    "CREATE TABLE IF NOT EXISTS artifact_index (artifact_type TEXT PRIMARY KEY, artifact_path TEXT NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS artifact_index ("
+    "artifact_type TEXT PRIMARY KEY, artifact_path TEXT NOT NULL)"
 )
-conn.execute("INSERT OR IGNORE INTO pipeline_jobs(stage, status, attempt) VALUES ('decode', 'running', 1)")
+conn.execute(
+    "INSERT OR IGNORE INTO pipeline_jobs(stage, status, attempt) "
+    "VALUES ('decode', 'running', 1)"
+)
 conn.commit()
 
 with open(temp_path, "wb") as f:
@@ -549,7 +554,8 @@ except Exception:
 
 conn.execute("UPDATE pipeline_jobs SET status='completed' WHERE stage='decode'")
 conn.execute(
-    "INSERT OR IGNORE INTO artifact_index(artifact_type, artifact_path) VALUES ('normalized_wav', ?)",
+    "INSERT OR IGNORE INTO artifact_index(artifact_type, artifact_path) "
+    "VALUES ('normalized_wav', ?)",
     (str(final_path),),
 )
 conn.commit()
@@ -608,13 +614,16 @@ final_path.parent.mkdir(parents=True, exist_ok=True)
 
 conn = sqlite3.connect(db_path)
 conn.execute(
-    "CREATE TABLE IF NOT EXISTS pipeline_jobs (stage TEXT PRIMARY KEY, status TEXT NOT NULL, attempt INTEGER NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS pipeline_jobs ("
+    "stage TEXT PRIMARY KEY, status TEXT NOT NULL, attempt INTEGER NOT NULL)"
 )
 conn.execute(
-    "CREATE TABLE IF NOT EXISTS artifact_index (artifact_type TEXT PRIMARY KEY, artifact_path TEXT NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS artifact_index ("
+    "artifact_type TEXT PRIMARY KEY, artifact_path TEXT NOT NULL)"
 )
 conn.execute(
-    "INSERT OR IGNORE INTO pipeline_jobs(stage, status, attempt) VALUES ('features', 'running', 1)"
+    "INSERT OR IGNORE INTO pipeline_jobs(stage, status, attempt) "
+    "VALUES ('features', 'running', 1)"
 )
 conn.commit()
 
@@ -635,7 +644,8 @@ except Exception:
 
 conn.execute("UPDATE pipeline_jobs SET status='completed' WHERE stage='features'")
 conn.execute(
-    "INSERT OR IGNORE INTO artifact_index(artifact_type, artifact_path) VALUES ('feature_pack', ?)",
+    "INSERT OR IGNORE INTO artifact_index(artifact_type, artifact_path) "
+    "VALUES ('feature_pack', ?)",
     (str(final_path),),
 )
 conn.commit()

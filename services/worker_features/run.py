@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 import h5py
 import numpy as np
+from sqlalchemy import select
 
 from app.config import CANONICAL_SAMPLE_RATE, DEFAULT_FEATURE_SPEC_ID, FEATURES_DIR
 from app.db import FeatureSpecAliasCollision, init_db, register_feature_spec
@@ -510,7 +511,11 @@ def _ensure_feature_pack_metadata_from_h5(
         spec_id = str(attr_spec_id) if attr_spec_id is not None else fallback_spec_id
         spec_alias = str(attr_spec_alias) if attr_spec_alias is not None else fallback_spec_alias
         model_sha256 = str(attr_model_hash) if attr_model_hash is not None else None
-        computed_at = str(attr_computed_at) if attr_computed_at is not None else datetime.now(UTC).isoformat()
+        computed_at = (
+            str(attr_computed_at)
+            if attr_computed_at is not None
+            else datetime.now(UTC).isoformat()
+        )
 
         mel_shape = list(f["melspec"].shape) if "melspec" in f else None
         embedding_shape = list(f["embeddings"].shape) if "embeddings" in f else None

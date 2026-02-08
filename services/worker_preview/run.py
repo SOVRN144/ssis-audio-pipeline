@@ -39,7 +39,7 @@ import time
 import wave
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +91,7 @@ FEATURE_SPEC_ALIAS_ENV = "SSIS_ACTIVE_FEATURE_SPEC_ALIAS"
 # --- Error Codes ---
 
 
-class PreviewErrorCode(str, Enum):
+class PreviewErrorCode(StrEnum):
     """Error codes for preview stage per Blueprint section 8."""
 
     INPUT_NOT_FOUND = "INPUT_NOT_FOUND"

@@ -123,7 +123,9 @@ class TestDetermineNextStageArtifactAuthoritative:
             (STAGE_PREVIEW, STAGE_PREVIEW),
         ],
     )
-    def test_completed_job_missing_artifact_returns_stage(self, test_db, target_stage, expected_stage):
+    def test_completed_job_missing_artifact_returns_stage(
+        self, test_db, target_stage, expected_stage
+    ):
         session = test_db()
         try:
             asset_id = f"test-missing-artifact-{target_stage}"

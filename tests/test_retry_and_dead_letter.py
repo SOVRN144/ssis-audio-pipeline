@@ -26,7 +26,6 @@ from app.orchestrator import (
     _orchestrator_tick_impl,
 )
 
-
 PIPELINE_JOB_SCHEMA_PATH = Path(__file__).parent.parent / "specs" / "pipeline_job.schema.json"
 
 

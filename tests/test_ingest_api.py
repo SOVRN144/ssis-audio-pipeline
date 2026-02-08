@@ -76,7 +76,9 @@ class TestIngestLocal:
             assert job.error_code is None
             assert job.metrics_json is not None
             metrics_doc = (
-                job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
+                job.metrics_json
+                if isinstance(job.metrics_json, dict)
+                else json.loads(job.metrics_json)
             )
             assert "ingest" in metrics_doc
             ingest_metrics = metrics_doc["ingest"]
@@ -230,7 +232,9 @@ class TestIngestUpload:
             assert job.status == "completed"
             assert job.metrics_json is not None
             metrics_doc = (
-                job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
+                job.metrics_json
+                if isinstance(job.metrics_json, dict)
+                else json.loads(job.metrics_json)
             )
             assert "ingest" in metrics_doc
             ingest_metrics = metrics_doc["ingest"]

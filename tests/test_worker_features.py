@@ -791,7 +791,9 @@ class TestFeaturePackMetadataContract:
             ):
                 with mock.patch("onnxruntime.SessionOptions"):
                     mock_session = mock.Mock()
-                    mock_session.get_inputs.return_value = [mock.Mock(name="input", shape=[1, 15360])]
+                    mock_session.get_inputs.return_value = [
+                        mock.Mock(name="input", shape=[1, 15360])
+                    ]
                     mock_session.run.return_value = [np.zeros(521), mock_embeddings[0]]
                     with mock.patch("onnxruntime.InferenceSession", return_value=mock_session):
                         with mock.patch(
