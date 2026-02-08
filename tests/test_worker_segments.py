@@ -736,6 +736,37 @@ class TestErrorMapping:
         assert not result.ok
         assert result.error_code == SegmentsErrorCode.SEGMENTATION_FAILED.value
 
+    def test_known_segmenter_typeerror_uses_deterministic_fallback(
+        self, temp_data_dir, monkeypatch
+    ):
+        """Known pyannote stack TypeError should fallback to deterministic segments."""
+        tmpdir, data_dir, audio_dir, segments_dir = temp_data_dir
+        asset_id = "test-segmenter-compat-fallback"
+        asset_dir = audio_dir / asset_id
+        _create_test_wav(asset_dir / "normalized.wav", duration_sec=8.0)
+
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.SEGMENTS_DIR", segments_dir)
+        monkeypatch.setattr("app.config.SEGMENTS_DIR", segments_dir)
+
+        compat_error = TypeError(
+            'arrays to stack must be passed as a "sequence" type such as list or tuple.'
+        )
+        with mock.patch(
+            "services.worker_segments.run._run_segmenter",
+            side_effect=compat_error,
+        ):
+            result = run_segments_worker(asset_id)
+
+        assert result.ok
+        assert result.metrics["source"] == SEGMENT_SOURCE_DERIVED
+        assert result.metrics["segment_count"] >= 1
+        assert result.artifact_path is not None
+
+        artifact_data = json.loads(Path(result.artifact_path).read_text())
+        assert artifact_data["segments"], "Fallback should still produce segments"
+        assert all(seg["source"] == SEGMENT_SOURCE_DERIVED for seg in artifact_data["segments"])
+
     def test_missing_input_returns_input_not_found(self, temp_data_dir, monkeypatch):
         """Test that missing input file returns INPUT_NOT_FOUND."""
         tmpdir, data_dir, audio_dir, segments_dir = temp_data_dir

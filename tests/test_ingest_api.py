@@ -74,6 +74,15 @@ class TestIngestLocal:
             assert job.status == "completed"
             assert job.asset_id == data["asset_id"]
             assert job.error_code is None
+            assert job.metrics_json is not None
+            metrics_doc = (
+                job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
+            )
+            assert "ingest" in metrics_doc
+            ingest_metrics = metrics_doc["ingest"]
+            for key in ("file_size_bytes", "content_hash", "hash_time_ms", "format_guess"):
+                assert key in ingest_metrics
+            assert ingest_metrics["hash_time_ms"] >= 0
         finally:
             session.close()
 
@@ -219,6 +228,15 @@ class TestIngestUpload:
             job = session.execute(job_stmt).scalar_one()
             assert job.stage == "ingest"
             assert job.status == "completed"
+            assert job.metrics_json is not None
+            metrics_doc = (
+                job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
+            )
+            assert "ingest" in metrics_doc
+            ingest_metrics = metrics_doc["ingest"]
+            for key in ("file_size_bytes", "content_hash", "hash_time_ms", "format_guess"):
+                assert key in ingest_metrics
+            assert ingest_metrics["hash_time_ms"] >= 0
         finally:
             session.close()
 

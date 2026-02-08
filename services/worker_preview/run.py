@@ -96,6 +96,7 @@ class PreviewErrorCode(str, Enum):
 
     INPUT_NOT_FOUND = "INPUT_NOT_FOUND"
     FEATUREPACK_MISSING = "FEATUREPACK_MISSING"
+    PREVIEW_LOW_CONF = "PREVIEW_LOW_CONF"
     PREVIEW_FAILED = "PREVIEW_FAILED"
     PREVIEW_INVALID = "PREVIEW_INVALID"
 
@@ -130,15 +131,15 @@ class PreviewResult:
 # --- FeatureSpec Selection ---
 
 
-def _get_feature_spec_alias() -> str:
-    """Get the active feature spec alias.
+def _get_env_feature_spec_alias() -> str | None:
+    """Get a validated env feature spec alias, if set.
 
     Selection rule (LOCKED):
     1. Check SSIS_ACTIVE_FEATURE_SPEC_ALIAS env var first (must be valid 12-char hex)
-    2. If not set or invalid, derive from DEFAULT_FEATURE_SPEC_ID
+    2. Return None if not set or invalid
 
     Returns:
-        12-character hex feature spec alias.
+        12-character alias from env, or None.
     """
     env_alias = os.environ.get(FEATURE_SPEC_ALIAS_ENV)
     if env_alias:
@@ -150,9 +151,45 @@ def _get_feature_spec_alias() -> str:
                 FEATURE_SPEC_ALIAS_ENV,
                 env_alias,
             )
-            return compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+            return None
         return alias
+    return None
+
+
+def _get_feature_spec_alias() -> str:
+    """Get the active feature spec alias.
+
+    Returns env override if valid, otherwise default alias.
+    """
+    env_alias = _get_env_feature_spec_alias()
+    if env_alias is not None:
+        return env_alias
     return compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+
+def _select_feature_spec_alias_for_asset(asset_id: str) -> str:
+    """Select feature spec alias for an asset per v1.4 rule.
+
+    1. If env alias is set and that asset has the corresponding FeaturePack, use it.
+    2. Otherwise use default alias.
+    """
+    default_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+    env_alias = _get_env_feature_spec_alias()
+    if env_alias is None:
+        return default_alias
+
+    env_features_path = features_h5_path(asset_id, env_alias)
+    if env_features_path.exists():
+        return env_alias
+
+    logger.warning(
+        "Configured %s alias '%s' missing for asset_id=%s, falling back to default alias '%s'",
+        FEATURE_SPEC_ALIAS_ENV,
+        env_alias,
+        asset_id,
+        default_alias,
+    )
+    return default_alias
 
 
 # --- Audio Duration Helper ---
@@ -696,7 +733,7 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
     start_time = time.monotonic()
 
     # Get feature spec alias (LOCKED selection rule)
-    spec_alias = _get_feature_spec_alias()
+    spec_alias = _select_feature_spec_alias_for_asset(asset_id)
 
     # Get paths
     output_path = preview_json_path(asset_id)
@@ -860,6 +897,7 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
     best_score = 0.0
     confidence = None
     reason = None
+    taxonomy_code = None
 
     if candidates:
         # Sort by score descending
@@ -884,6 +922,7 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
             end_sec = min(intro_start + WINDOW_SEC, total_duration)
             confidence = best_score  # Report best score even if not used
             reason = f"Best score {best_score:.3f} below threshold {SCORE_THRESHOLD}"
+            taxonomy_code = PreviewErrorCode.PREVIEW_LOW_CONF.value
     else:
         # No valid candidates, full fallback
         mode = "fallback"
@@ -892,6 +931,7 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
         start_sec = intro_start
         end_sec = min(intro_start + WINDOW_SEC, total_duration)
         reason = "No valid candidates generated"
+        taxonomy_code = PreviewErrorCode.PREVIEW_LOW_CONF.value
 
     start_sec, end_sec = _ensure_min_window(start_sec, end_sec, total_duration)
 
@@ -985,6 +1025,8 @@ def run_preview_worker(asset_id: str) -> PreviewResult:
         "schema_id": PREVIEW_SCHEMA_ID,
         "version": PREVIEW_VERSION,
     }
+    if taxonomy_code is not None:
+        metrics["taxonomy_code"] = taxonomy_code
 
     logger.info(
         "Preview computed for asset_id=%s: mode=%s, score=%.3f, %dms",

@@ -4,45 +4,25 @@
 
 SSIS Audio Pipeline (Blueprint #1) is a multi-stage, resilient audio processing system designed for streaming segmentation and analysis. The pipeline accepts raw audio files, normalizes them, extracts acoustic features, identifies speech/music segments, generates compact preview representations, and maintains telemetry for each processing job. Built for local-first operation without cloud dependencies, it emphasizes atomic file operations, contract-driven development, and comprehensive testing across contract, end-to-end, and resilience dimensions.
 
-## Planned Artifacts (Blueprint #1 v1.4)
+## Runtime Artifacts (Blueprint #1 v1.4)
 
-The following artifacts are defined by SSIS Blueprint #1 v1.4 and will be implemented in later steps:
+The pipeline currently produces and indexes the following artifacts:
 
-- **AudioAsset**: Metadata record tracking the original audio file and processing state
-- **normalized.wav**: 22050 Hz mono, 16-bit PCM WAV (canonical derivative)
-- **FeaturePack.h5**: HDF5-stored acoustic feature vectors (MFCC, spectral features)
-- **segments.json**: Timestamped speech/music classification segments with confidence scores
-- **preview.json**: Compact audio summary with statistical features and representative snippets
-- **pipeline_jobs**: Telemetry database tracking job state, timing, and error conditions
-- **feature_specs**: Registry of feature extraction configurations and versioning
+- **AudioAsset** metadata rows in `audio_assets`
+- **normalized.wav** at `data/audio/{asset_id}/normalized.wav`
+- **FeaturePack HDF5** at `data/features/{asset_id}.{feature_spec_alias}.h5`
+- **FeaturePack metadata JSON** at `data/features/{asset_id}.{feature_spec_alias}.feature_pack.v1.json`
+- **segments JSON** at `data/segments/{asset_id}.segments.v1.json`
+- **preview JSON** at `data/preview/{asset_id}.preview.v1.json`
+- **pipeline_jobs** stage telemetry rows
+- **artifact_index** rows for published artifacts
+- **feature_specs** registry rows for alias/spec immutability
 
-> **Note**: These artifacts are not yet implemented. Step 0 provides repo scaffolding and CI only.
+## Implementation Status
 
-## Development Roadmap
-
-### Step 0: Repository Setup and CI Scaffolding (Current)
-
-- [x] GitHub repository creation
-- [x] Directory structure and placeholder files
-- [x] Python tooling configuration (pyproject.toml, ruff, mypy)
-- [x] CI pipeline (GitHub Actions)
-- [x] Blueprint specification documents
-
-### Step 1: Contracts + DB Primitives + Atomic I/O (Next)
-
-- [ ] Define data contracts for all artifacts
-- [ ] Implement database primitives for AudioAsset and pipeline_jobs
-- [ ] Build atomic file I/O layer with crash resilience
-- [ ] Contract tests for all interfaces
-- [ ] End-to-end test scaffolding
-
-### Step 2+: Worker Implementation
-
-- [ ] Ingest API service
-- [ ] Worker services (decode, features, segments, preview)
-- [ ] Feature extraction pipeline
-- [ ] Segment classification
-- [ ] Preview generation
+- Ingest API, orchestrator, and all stage workers (`decode/features/segments/preview`) are implemented.
+- Atomic publish is used for final artifact writes.
+- Periodic Huey sweep enqueues `orchestrator_tick_task(asset_id)` for assets needing work.
 
 ## Development Setup
 
@@ -109,6 +89,78 @@ pytest -v
 pytest tests/contract/
 ```
 
+### Huey Orchestrator Sweep
+
+Run the Huey consumer with periodic tasks enabled:
+
+```bash
+huey_consumer.py app.huey_app.huey
+```
+
+The consumer executes `orchestrator_sweep_task` once per minute. The sweep looks
+for assets that have a completed ingest job, have not been dead-lettered, and
+still have pending pipeline stages. Up to 50 assets per sweep are enqueued via
+`orchestrator_tick_task(asset_id)`, which prevents Huey from attempting to call
+the tick task with missing arguments while still driving stage progression.
+
+`huey_consumer.py app.huey_app.huey -S` is also valid; `-S` enables simple logging and does not disable periodic tasks. Use `-n` only if you want to disable periodic scheduling.
+
+### End-to-End Local Runbook (3 Terminals)
+
+Terminal A (API):
+
+```bash
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+uvicorn services.ingest_api.main:app --host 127.0.0.1 --port 8001 --reload
+```
+
+Terminal B (Huey consumer + periodic sweep):
+
+```bash
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+huey_consumer.py app.huey_app.huey -S
+```
+
+Terminal C (ingest + verification):
+
+```bash
+source .venv/bin/activate
+ffmpeg -y -i tmp/demo_input_unique.wav -filter:a "apad=pad_dur=0.37,volume=0.98" -t 8.62 tmp/restart_unique2.wav
+ABS_WAV="$(pwd)/tmp/restart_unique2.wav"
+curl -s -X POST http://127.0.0.1:8001/v1/ingest/local \
+  -H "Content-Type: application/json" \
+  -d "{\"source_path\":\"$ABS_WAV\",\"owner_entity_id\":\"demo-local\",\"original_filename\":\"restart_unique2.wav\",\"metadata\":{\"test\":\"blueprint1.4_restart\"}}" \
+| tee /tmp/ingest_resp_restart2.json
+
+ASSET_ID="$(python - <<'PY'
+import json
+print(json.load(open("/tmp/ingest_resp_restart2.json"))["asset_id"])
+PY
+)"
+echo "ASSET_ID=$ASSET_ID"
+
+sqlite3 data/ssis.db "
+select stage,status,attempt,created_at,job_id,error_code,substr(error_message,1,120)
+from pipeline_jobs
+where asset_id='$ASSET_ID'
+order by id;"
+
+ls -lh data/audio/$ASSET_ID/normalized.wav
+ls -lh data/features/$ASSET_ID*.h5
+ls -lh data/segments/$ASSET_ID.segments.v1.json
+ls -lh data/preview/$ASSET_ID.preview.v1.json
+
+sqlite3 data/ssis.db "
+select artifact_type, feature_spec_alias, schema_version, created_at, artifact_path
+from artifact_index
+where asset_id='$ASSET_ID'
+order by created_at;"
+```
+
+Feature alias note: if `SSIS_ACTIVE_FEATURE_SPEC_ALIAS` is set but the asset does not have a pack for that alias, preview falls back to the default alias when that default pack exists.
+
 ### Code Quality
 
 ```bash
@@ -137,21 +189,21 @@ mypy app/ services/
 ```
 ssis-audio-pipeline/
 ├── .claude/agents/         # Claude Code project-level subagents
-├── app/                    # Core application modules (placeholder)
-│   └── utils/              # Shared utilities (placeholder)
+├── app/                    # Core application modules
+│   └── utils/              # Shared utilities
 ├── docs/                   # Human-readable documentation
 │   └── blueprints/         # Blueprint PDFs and research docs
-├── services/               # Service components (placeholders)
+├── services/               # Service components
 │   ├── ingest_api/         # Audio ingestion endpoint
 │   ├── worker_decode/      # Audio normalization worker
 │   ├── worker_features/    # Feature extraction worker
 │   ├── worker_segments/    # Segmentation worker
 │   └── worker_preview/     # Preview generation worker
 ├── tests/                  # Test suites
-│   ├── contract/           # Contract tests (placeholder)
-│   ├── e2e/                # End-to-end tests (placeholder)
-│   └── resilience/         # Resilience tests (placeholder)
-├── specs/                  # Reserved for JSON Schemas (Step 1)
+│   ├── contract/           # Contract tests
+│   ├── e2e/                # End-to-end tests
+│   └── resilience/         # Resilience tests
+├── specs/                  # JSON Schemas
 ├── data/                   # Local data storage (gitignored)
 ├── logs/                   # Application logs (gitignored)
 └── CLAUDE.md               # Repo operating rules for AI agents
@@ -168,4 +220,4 @@ Blueprint specification documents are available in `docs/blueprints/`:
 - SSIS Research Pack v1.0.pdf
 - SSIS Blueprint #1 v1.4 Checklist.pdf
 
-> **Note**: The `specs/` directory is reserved for machine-readable JSON Schemas, to be added in Step 1.
+`specs/` contains machine-readable JSON Schemas used by tests and runtime validation gates.

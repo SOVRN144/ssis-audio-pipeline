@@ -6,6 +6,7 @@ All tests mock onnxruntime to run without the actual ONNX model.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import tempfile
 import wave
@@ -16,11 +17,14 @@ from unittest import mock
 import h5py
 import numpy as np
 import pytest
+from jsonschema import FormatChecker
+from jsonschema.validators import validator_for
 
 from app.config import DEFAULT_FEATURE_SPEC_ID
 from app.db import FeatureSpecAliasCollision, init_db, register_feature_spec
 from app.models import FeatureSpec
 from app.utils.hashing import feature_spec_alias
+from app.utils.paths import feature_pack_meta_json_path
 from services.worker_features.run import (
     ARTIFACT_SCHEMA_VERSION,
     EMBED_HOP_SEC,
@@ -740,6 +744,121 @@ class TestAtomicPublish:
             assert f.attrs["embedding_dim"] == EMBEDDING_DIM
             assert f.attrs["embed_hop_sec"] == EMBED_HOP_SEC
             assert f.attrs["backend"] == "onnxruntime"
+
+        session.close()
+
+
+# --- Test: Feature Pack Metadata Contract ---
+
+
+class TestFeaturePackMetadataContract:
+    """Tests for feature pack metadata JSON contract and idempotency behavior."""
+
+    def test_metadata_json_written_and_schema_valid(self, temp_dirs, monkeypatch):
+        """Feature worker should write metadata JSON satisfying feature_pack schema."""
+        tmpdir, _, SessionFactory, audio_dir, features_dir = temp_dirs
+        session = SessionFactory()
+
+        asset_id = "test-feature-pack-meta"
+        asset_dir = audio_dir / asset_id
+        _create_test_wav(asset_dir / "normalized.wav")
+
+        monkeypatch.setattr("app.config.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.config.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+
+        model_content = b"fake model for metadata contract"
+        expected_hash = hashlib.sha256(model_content).hexdigest()
+        yamnet_dir = Path(tmpdir) / "yamnet_onnx"
+        yamnet_dir.mkdir(parents=True, exist_ok=True)
+        (yamnet_dir / "yamnet.onnx").write_bytes(model_content)
+        (yamnet_dir / "yamnet.onnx.sha256").write_text(expected_hash)
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_ONNX_PATH", yamnet_dir / "yamnet.onnx"
+        )
+        monkeypatch.setattr(
+            "services.worker_features.run.YAMNET_SHA256_PATH", yamnet_dir / "yamnet.onnx.sha256"
+        )
+
+        mock_mel = _generate_mock_mel(n_frames=120)
+        mock_embeddings = _generate_mock_embeddings(n_embed_frames=7)
+        with mock.patch(
+            "librosa.load", return_value=(np.zeros(SAMPLE_RATE * 3, dtype=np.float32), SAMPLE_RATE)
+        ):
+            with mock.patch(
+                "services.worker_features.run._compute_mel_spectrogram", return_value=mock_mel
+            ):
+                with mock.patch("onnxruntime.SessionOptions"):
+                    mock_session = mock.Mock()
+                    mock_session.get_inputs.return_value = [mock.Mock(name="input", shape=[1, 15360])]
+                    mock_session.run.return_value = [np.zeros(521), mock_embeddings[0]]
+                    with mock.patch("onnxruntime.InferenceSession", return_value=mock_session):
+                        with mock.patch(
+                            "services.worker_features.run._compute_yamnet_embeddings",
+                            return_value=mock_embeddings,
+                        ):
+                            result = extract_features(session, asset_id)
+
+        assert result.ok
+        spec_alias = feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        meta_path = feature_pack_meta_json_path(asset_id, spec_alias)
+        assert meta_path.exists()
+
+        metadata = json.loads(meta_path.read_text())
+        assert metadata["schema_id"] == "feature_pack.v1"
+        assert metadata["version"] == "1.0.0"
+        assert metadata["asset_id"] == asset_id
+        assert metadata["feature_spec_alias"] == spec_alias
+        assert metadata["feature_spec_id"] == DEFAULT_FEATURE_SPEC_ID
+        assert metadata["embedding_backend"] == "onnxruntime"
+        assert metadata["embedding_model_id"] == "yamnet"
+        assert metadata["embedding_model_hash"] == f"sha256:{expected_hash}"
+        assert metadata["hdf5_uri"] == f"data/features/{asset_id}.{spec_alias}.h5#/embeddings"
+
+        schema_path = Path(__file__).parent.parent / "specs" / "feature_pack.schema.json"
+        schema = json.loads(schema_path.read_text())
+        validator_cls = validator_for(schema)
+        validator = validator_cls(schema, format_checker=FormatChecker())
+        validator.validate(metadata)
+
+        session.close()
+
+    def test_existing_h5_backfills_metadata_on_early_return(self, temp_dirs, monkeypatch):
+        """If HDF5 exists and metadata is missing, early-return path should create metadata."""
+        tmpdir, _, SessionFactory, audio_dir, features_dir = temp_dirs
+        session = SessionFactory()
+
+        asset_id = "test-meta-backfill"
+        spec_alias = feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        h5_path = features_dir / f"{asset_id}.{spec_alias}.h5"
+        h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with h5py.File(h5_path, "w") as f:
+            f.create_dataset("melspec", data=np.zeros((10, N_MELS), dtype=np.float32))
+            f.create_dataset("embeddings", data=np.zeros((2, EMBEDDING_DIM), dtype=np.float32))
+            f.attrs["feature_spec_id"] = DEFAULT_FEATURE_SPEC_ID
+            f.attrs["feature_spec_alias"] = spec_alias
+            f.attrs["model_sha256"] = "0" * 64
+            f.attrs["computed_at"] = "2024-01-01T00:00:00+00:00"
+
+        monkeypatch.setattr("app.config.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.config.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+
+        meta_path = feature_pack_meta_json_path(asset_id, spec_alias)
+        if meta_path.exists():
+            meta_path.unlink()
+
+        result = extract_features(session, asset_id)
+        assert result.ok
+        assert "already exists" in (result.message or "").lower()
+        assert meta_path.exists()
+
+        metadata = json.loads(meta_path.read_text())
+        assert metadata["feature_spec_alias"] == spec_alias
+        assert metadata["hdf5_uri"] == f"data/features/{asset_id}.{spec_alias}.h5#/embeddings"
 
         session.close()
 

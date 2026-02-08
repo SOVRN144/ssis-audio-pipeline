@@ -6,11 +6,14 @@ Step 3: Tests Blueprint section 9 retry semantics:
 - Dead-letter after 4th failure
 """
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from jsonschema import FormatChecker
+from jsonschema.validators import validator_for
 from sqlalchemy import select
 
 from app.config import MAX_ATTEMPTS_TOTAL, RETRY_DELAYS_SECONDS
@@ -22,6 +25,9 @@ from app.orchestrator import (
     _mark_dead_letter,
     _orchestrator_tick_impl,
 )
+
+
+PIPELINE_JOB_SCHEMA_PATH = Path(__file__).parent.parent / "specs" / "pipeline_job.schema.json"
 
 
 @pytest.fixture
@@ -113,6 +119,35 @@ class TestRetryPolicy:
             assert job.attempt == 1
         finally:
             session.close()
+
+
+class TestPipelineJobSchemaStatus:
+    """Schema/runtime status values must stay aligned."""
+
+    def test_schema_includes_queued_status(self):
+        """pipeline_job schema status enum should include queued."""
+        schema = json.loads(PIPELINE_JOB_SCHEMA_PATH.read_text())
+        status_enum = schema["properties"]["status"]["enum"]
+        assert "queued" in status_enum
+
+    def test_runtime_statuses_validate_against_schema(self):
+        """All runtime-emitted statuses should validate against pipeline_job schema."""
+        schema = json.loads(PIPELINE_JOB_SCHEMA_PATH.read_text())
+        validator_cls = validator_for(schema)
+        validator = validator_cls(schema, format_checker=FormatChecker())
+
+        runtime_statuses = ["pending", "queued", "running", "completed", "failed", "dead_letter"]
+        for status in runtime_statuses:
+            instance = {
+                "schema_id": "pipeline_job.v1",
+                "version": "1.0.0",
+                "asset_id": "asset-123",
+                "computed_at": "2026-02-08T00:00:00Z",
+                "job_id": "job-123",
+                "stage": "decode",
+                "status": status,
+            }
+            validator.validate(instance)
 
 
 class TestRetryBehavior:

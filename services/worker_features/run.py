@@ -34,6 +34,7 @@ Failpoints (Step 8 resilience harness):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -48,9 +49,10 @@ import numpy as np
 from app.config import CANONICAL_SAMPLE_RATE, DEFAULT_FEATURE_SPEC_ID, FEATURES_DIR
 from app.db import FeatureSpecAliasCollision, init_db, register_feature_spec
 from app.orchestrator import ARTIFACT_TYPE_FEATURES_H5
+from app.utils.atomic_io import atomic_write_text
 from app.utils.failpoints import maybe_fail
 from app.utils.hashing import feature_spec_alias, sha256_file
-from app.utils.paths import audio_normalized_path, features_h5_path
+from app.utils.paths import audio_normalized_path, feature_pack_meta_json_path, features_h5_path
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -78,6 +80,11 @@ MODEL_ID = "yamnet"
 
 # Schema version for HDF5 artifact
 ARTIFACT_SCHEMA_VERSION = "1.0.0"
+
+# Feature pack metadata schema and artifact type (Blueprint section 6)
+FEATURE_PACK_SCHEMA_ID = "feature_pack.v1"
+FEATURE_PACK_SCHEMA_VERSION = "1.0.0"
+ARTIFACT_TYPE_FEATURE_PACK_META_V1 = "feature_pack_meta_v1"
 
 # --- Model Paths ---
 
@@ -119,6 +126,9 @@ class FeaturesResult:
     artifact_type: str | None = None
     schema_version: str | None = None
     feature_spec_alias: str | None = None
+    metadata_artifact_path: str | None = None
+    metadata_artifact_type: str | None = None
+    metadata_schema_version: str | None = None
 
 
 # --- Model Verification ---
@@ -438,6 +448,86 @@ def _write_hdf5_atomic(
         pass
 
 
+def _build_feature_pack_metadata(
+    asset_id: str,
+    spec_id: str,
+    spec_alias: str,
+    model_sha256: str | None,
+    computed_at: str,
+    mel_shape: list[int] | None,
+    embedding_shape: list[int] | None,
+) -> dict[str, Any]:
+    """Build feature pack metadata payload matching specs/feature_pack.schema.json."""
+    h5_uri = f"data/features/{asset_id}.{spec_alias}.h5#/embeddings"
+    payload: dict[str, Any] = {
+        "schema_id": FEATURE_PACK_SCHEMA_ID,
+        "version": FEATURE_PACK_SCHEMA_VERSION,
+        "asset_id": asset_id,
+        "computed_at": computed_at,
+        "feature_spec_alias": spec_alias,
+        "feature_spec_id": spec_id,
+        "embedding_backend": BACKEND,
+        "embedding_model_id": MODEL_ID,
+        "embedding_model_hash": f"sha256:{model_sha256}" if model_sha256 else None,
+        "hdf5_uri": h5_uri,
+        "mel_shape": mel_shape,
+        "embedding_shape": embedding_shape,
+        "sample_rate": SAMPLE_RATE,
+        "mel_hop_samples": HOP_LENGTH,
+        "embedding_hop_sec": EMBED_HOP_SEC,
+    }
+    return payload
+
+
+def _write_feature_pack_metadata_atomic(metadata_path: Path, payload: dict[str, Any]) -> None:
+    """Write feature pack metadata JSON atomically."""
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(metadata_path, json.dumps(payload, indent=2))
+
+
+def _ensure_feature_pack_metadata_from_h5(
+    h5_path: Path,
+    metadata_path: Path,
+    asset_id: str,
+    fallback_spec_id: str,
+    fallback_spec_alias: str,
+) -> tuple[Path, dict[str, Any]]:
+    """Ensure metadata JSON exists for an already-published HDF5 artifact."""
+    if metadata_path.exists():
+        try:
+            with open(metadata_path) as f:
+                return metadata_path, json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # Regenerate from HDF5 if metadata file is corrupt/unreadable.
+            pass
+
+    with h5py.File(h5_path, "r") as f:
+        attr_spec_id = f.attrs.get("feature_spec_id")
+        attr_spec_alias = f.attrs.get("feature_spec_alias")
+        attr_model_hash = f.attrs.get("model_sha256")
+        attr_computed_at = f.attrs.get("computed_at")
+
+        spec_id = str(attr_spec_id) if attr_spec_id is not None else fallback_spec_id
+        spec_alias = str(attr_spec_alias) if attr_spec_alias is not None else fallback_spec_alias
+        model_sha256 = str(attr_model_hash) if attr_model_hash is not None else None
+        computed_at = str(attr_computed_at) if attr_computed_at is not None else datetime.now(UTC).isoformat()
+
+        mel_shape = list(f["melspec"].shape) if "melspec" in f else None
+        embedding_shape = list(f["embeddings"].shape) if "embeddings" in f else None
+
+    payload = _build_feature_pack_metadata(
+        asset_id=asset_id,
+        spec_id=spec_id,
+        spec_alias=spec_alias,
+        model_sha256=model_sha256,
+        computed_at=computed_at,
+        mel_shape=mel_shape,
+        embedding_shape=embedding_shape,
+    )
+    _write_feature_pack_metadata_atomic(metadata_path, payload)
+    return metadata_path, payload
+
+
 # --- Cleanup ---
 
 
@@ -475,6 +565,7 @@ def extract_features(
     session: Session,
     asset_id: str,
     feature_spec_id: str | None = None,
+    feature_spec_alias_override: str | None = None,
 ) -> FeaturesResult:
     """Extract features from a normalized audio asset.
 
@@ -484,26 +575,84 @@ def extract_features(
         session: Database session.
         asset_id: The asset ID to process.
         feature_spec_id: Optional feature spec ID. Defaults to DEFAULT_FEATURE_SPEC_ID.
+        feature_spec_alias_override: Optional alias override for reroute recovery.
 
     Returns:
         FeaturesResult with success/failure status and metrics.
     """
     start_time = time.monotonic()
 
-    # Use default feature spec if not specified
-    if feature_spec_id is None:
+    # Resolve requested feature spec.
+    default_alias = feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+    requested_alias = feature_spec_alias_override.lower() if feature_spec_alias_override else None
+
+    if feature_spec_id is None and requested_alias is None:
         feature_spec_id = DEFAULT_FEATURE_SPEC_ID
+
+    if feature_spec_id is None and requested_alias is not None:
+        if requested_alias == default_alias:
+            feature_spec_id = DEFAULT_FEATURE_SPEC_ID
+        else:
+            from app.models import FeatureSpec
+
+            stmt = select(FeatureSpec).where(FeatureSpec.alias == requested_alias)
+            spec_row = session.execute(stmt).scalar_one_or_none()
+            if spec_row is None:
+                return FeaturesResult(
+                    ok=False,
+                    error_code=FeaturesErrorCode.FEATURE_EXTRACTION_FAILED,
+                    message=(
+                        f"feature_spec_alias '{requested_alias}' is not registered, "
+                        "cannot resolve feature_spec_id"
+                    ),
+                )
+            feature_spec_id = spec_row.feature_spec_id
 
     # Compute feature spec alias
     spec_alias = feature_spec_alias(feature_spec_id)
+    if requested_alias is not None and requested_alias != spec_alias:
+        return FeaturesResult(
+            ok=False,
+            error_code=FeaturesErrorCode.FEATURE_EXTRACTION_FAILED,
+            message=(
+                f"feature_spec_alias '{requested_alias}' does not match "
+                f"feature_spec_id '{feature_spec_id}' alias '{spec_alias}'"
+            ),
+        )
 
     # Get paths
     input_path = audio_normalized_path(asset_id)
     output_path = features_h5_path(asset_id, spec_alias)
+    metadata_path = feature_pack_meta_json_path(asset_id, spec_alias)
 
     # --- Idempotency: Check if output already exists ---
     if output_path.exists():
-        logger.info("Feature pack already exists for asset_id=%s, alias=%s", asset_id, spec_alias)
+        logger.info(
+            "Feature pack already exists for asset_id=%s, alias=%s (ensuring metadata)",
+            asset_id,
+            spec_alias,
+        )
+        try:
+            metadata_path, metadata_payload = _ensure_feature_pack_metadata_from_h5(
+                h5_path=output_path,
+                metadata_path=metadata_path,
+                asset_id=asset_id,
+                fallback_spec_id=feature_spec_id,
+                fallback_spec_alias=spec_alias,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to ensure feature pack metadata for asset_id=%s, alias=%s: %s",
+                asset_id,
+                spec_alias,
+                e,
+            )
+            return FeaturesResult(
+                ok=False,
+                error_code=FeaturesErrorCode.FEATURE_EXTRACTION_FAILED,
+                message=f"Failed to ensure feature pack metadata: {e}",
+            )
+
         return FeaturesResult(
             ok=True,
             message="Artifact already exists",
@@ -514,7 +663,12 @@ def extract_features(
             metrics={
                 "feature_spec_id": feature_spec_id,
                 "feature_spec_alias": spec_alias,
+                "feature_pack_meta_path": str(metadata_path),
+                "feature_pack_hdf5_uri": metadata_payload["hdf5_uri"],
             },
+            metadata_artifact_path=str(metadata_path),
+            metadata_artifact_type=ARTIFACT_TYPE_FEATURE_PACK_META_V1,
+            metadata_schema_version=FEATURE_PACK_SCHEMA_VERSION,
         )
 
     # --- Input validation ---
@@ -674,6 +828,31 @@ def extract_features(
             message=f"Failed to write HDF5: {e}",
         )
 
+    # --- Write feature pack metadata JSON (atomic) ---
+    try:
+        metadata_payload = _build_feature_pack_metadata(
+            asset_id=asset_id,
+            spec_id=feature_spec_id,
+            spec_alias=spec_alias,
+            model_sha256=model_sha256,
+            computed_at=datetime.now(UTC).isoformat(),
+            mel_shape=list(mel.shape),
+            embedding_shape=list(embeddings.shape),
+        )
+        _write_feature_pack_metadata_atomic(metadata_path, metadata_payload)
+    except Exception as e:
+        logger.error(
+            "Failed to write feature pack metadata for asset_id=%s, alias=%s: %s",
+            asset_id,
+            spec_alias,
+            e,
+        )
+        return FeaturesResult(
+            ok=False,
+            error_code=FeaturesErrorCode.FEATURE_EXTRACTION_FAILED,
+            message=f"Failed to write feature pack metadata: {e}",
+        )
+
     # --- Success ---
     feature_time_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -684,6 +863,8 @@ def extract_features(
         "embedding_shape": list(embeddings.shape),
         "nan_inf_count": 0,
         "feature_time_ms": feature_time_ms,
+        "feature_pack_meta_path": str(metadata_path),
+        "feature_pack_hdf5_uri": metadata_payload["hdf5_uri"],
     }
 
     logger.info(
@@ -702,6 +883,9 @@ def extract_features(
         artifact_type=ARTIFACT_TYPE_FEATURES_H5,
         schema_version=ARTIFACT_SCHEMA_VERSION,
         feature_spec_alias=spec_alias,
+        metadata_artifact_path=str(metadata_path),
+        metadata_artifact_type=ARTIFACT_TYPE_FEATURE_PACK_META_V1,
+        metadata_schema_version=FEATURE_PACK_SCHEMA_VERSION,
     )
 
 

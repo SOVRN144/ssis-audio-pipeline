@@ -15,13 +15,17 @@ from app.config import DEFAULT_FEATURE_SPEC_ID
 from app.db import init_db
 from app.models import ArtifactIndex, AudioAsset, PipelineJob, StageLock
 from app.orchestrator import (
+    ARTIFACT_TYPE_FEATURE_PACK_META_V1,
     ARTIFACT_TYPE_FEATURES_H5,
     ARTIFACT_TYPE_NORMALIZED_WAV,
     ARTIFACT_TYPE_PREVIEW_V1,
     ARTIFACT_TYPE_SEGMENTS_V1,
     STAGE_DECODE,
     STAGE_FEATURES,
+    STAGE_PREVIEW,
     STAGE_SEGMENTS,
+    _determine_next_stage,
+    _execute_features_stage,
     _orchestrator_tick_impl,
 )
 from app.utils.hashing import feature_spec_alias as compute_feature_spec_alias
@@ -103,6 +107,88 @@ class TestOrchestratorIdempotency:
             )
             count = session.execute(stmt).scalar()
             assert count == 1
+        finally:
+            session.close()
+
+
+class TestDetermineNextStageArtifactAuthoritative:
+    """Completed jobs must not suppress rerun when final artifacts are missing."""
+
+    @pytest.mark.parametrize(
+        ("target_stage", "expected_stage"),
+        [
+            (STAGE_DECODE, STAGE_DECODE),
+            (STAGE_FEATURES, STAGE_FEATURES),
+            (STAGE_SEGMENTS, STAGE_SEGMENTS),
+            (STAGE_PREVIEW, STAGE_PREVIEW),
+        ],
+    )
+    def test_completed_job_missing_artifact_returns_stage(self, test_db, target_stage, expected_stage):
+        session = test_db()
+        try:
+            asset_id = f"test-missing-artifact-{target_stage}"
+            alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+            asset = AudioAsset(
+                asset_id=asset_id,
+                content_hash=f"missing-artifact-{target_stage}",
+                source_uri=f"/data/audio/{asset_id}/original.wav",
+                original_filename="test.wav",
+            )
+            session.add(asset)
+            session.add(
+                PipelineJob(
+                    job_id=f"ingest-{target_stage}",
+                    asset_id=asset_id,
+                    stage="ingest",
+                    status="completed",
+                    attempt=1,
+                )
+            )
+
+            # Seed prerequisite artifacts for later stages so planning reaches target stage.
+            if target_stage in (STAGE_FEATURES, STAGE_SEGMENTS, STAGE_PREVIEW):
+                session.add(
+                    ArtifactIndex(
+                        asset_id=asset_id,
+                        artifact_type=ARTIFACT_TYPE_NORMALIZED_WAV,
+                        artifact_path=f"/data/audio/{asset_id}/normalized.wav",
+                        schema_version="1.0.0",
+                    )
+                )
+            if target_stage in (STAGE_SEGMENTS, STAGE_PREVIEW):
+                session.add(
+                    ArtifactIndex(
+                        asset_id=asset_id,
+                        artifact_type=ARTIFACT_TYPE_FEATURES_H5,
+                        artifact_path=f"/data/features/{asset_id}.{alias}.h5",
+                        feature_spec_alias=alias,
+                        schema_version="1.0.0",
+                    )
+                )
+            if target_stage == STAGE_PREVIEW:
+                session.add(
+                    ArtifactIndex(
+                        asset_id=asset_id,
+                        artifact_type=ARTIFACT_TYPE_SEGMENTS_V1,
+                        artifact_path=f"/data/segments/{asset_id}.segments.v1.json",
+                        schema_version="1.0.0",
+                    )
+                )
+
+            session.add(
+                PipelineJob(
+                    job_id=f"{target_stage}-completed",
+                    asset_id=asset_id,
+                    stage=target_stage,
+                    status="completed",
+                    attempt=1,
+                    feature_spec_alias=alias if target_stage == STAGE_FEATURES else None,
+                )
+            )
+            session.commit()
+
+            assert _determine_next_stage(session, asset_id) == expected_stage
         finally:
             session.close()
 
@@ -678,5 +764,60 @@ class TestFeaturesLockAliasConsistency:
             # All stages complete - no work
             assert result["status"] == "no_work"
             assert result["reason"] == "all_stages_complete"
+        finally:
+            session.close()
+
+    def test_features_stage_records_metadata_artifact(self, asset_with_decode_complete):
+        """Features success should index both HDF5 and feature_pack_meta_v1 artifacts."""
+        asset_id, SessionFactory = asset_with_decode_complete
+        expected_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+        session = SessionFactory()
+        try:
+            job = PipelineJob(
+                job_id="features-meta-job",
+                asset_id=asset_id,
+                stage=STAGE_FEATURES,
+                status="running",
+                attempt=1,
+                feature_spec_alias=expected_alias,
+            )
+            session.add(job)
+            session.commit()
+
+            class _FakeResult:
+                ok = True
+                metrics = {"feature_spec_alias": expected_alias}
+                artifact_path = f"/data/features/{asset_id}.{expected_alias}.h5"
+                artifact_type = ARTIFACT_TYPE_FEATURES_H5
+                schema_version = "1.0.0"
+                feature_spec_alias = expected_alias
+                metadata_artifact_path = (
+                    f"/data/features/{asset_id}.{expected_alias}.feature_pack.v1.json"
+                )
+                metadata_schema_version = "1.0.0"
+
+            with patch("services.worker_features.run.extract_features", return_value=_FakeResult()):
+                result = _execute_features_stage(session, job, asset_id)
+                session.commit()
+
+            assert result["status"] == "completed"
+
+            h5_stmt = select(ArtifactIndex).where(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == ARTIFACT_TYPE_FEATURES_H5,
+                ArtifactIndex.feature_spec_alias == expected_alias,
+            )
+            h5_artifact = session.execute(h5_stmt).scalar_one_or_none()
+            assert h5_artifact is not None
+
+            meta_stmt = select(ArtifactIndex).where(
+                ArtifactIndex.asset_id == asset_id,
+                ArtifactIndex.artifact_type == ARTIFACT_TYPE_FEATURE_PACK_META_V1,
+                ArtifactIndex.feature_spec_alias == expected_alias,
+            )
+            meta_artifact = session.execute(meta_stmt).scalar_one_or_none()
+            assert meta_artifact is not None
+            assert meta_artifact.artifact_path.endswith(".feature_pack.v1.json")
         finally:
             session.close()
