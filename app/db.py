@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Engine, create_engine, select
+from sqlalchemy import Engine, create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import DB_PATH, STAGE_LOCK_TTL_SECONDS
@@ -85,8 +85,61 @@ def init_db(db_path: str | None = None, echo: bool = False) -> tuple[Engine, ses
 
     # Create all tables (idempotent via checkfirst=True default)
     Base.metadata.create_all(engine)
+    _migrate_stage_locks_lock_scope_key(engine)
 
     return engine, SessionFactory
+
+
+def _migrate_stage_locks_lock_scope_key(engine: Engine) -> None:
+    """SQLite-safe StageLock lock_scope_key migration.
+
+    Strategy:
+    - Check column existence via PRAGMA table_info(stage_locks)
+    - ADD COLUMN if missing
+    - Backfill from feature_spec_alias
+    - Fill null/empty with "__none__"
+    - De-duplicate by keeping MAX(id) per (asset_id, stage, lock_scope_key)
+    - Create additive unique index on (asset_id, stage, lock_scope_key)
+    """
+    with engine.begin() as conn:
+        columns = conn.execute(text("PRAGMA table_info(stage_locks)")).fetchall()
+        if not columns:
+            return
+
+        has_lock_scope_key = any(row[1] == "lock_scope_key" for row in columns)
+        if not has_lock_scope_key:
+            conn.execute(text("ALTER TABLE stage_locks ADD COLUMN lock_scope_key TEXT"))
+
+        conn.execute(
+            text(
+                "UPDATE stage_locks "
+                "SET lock_scope_key = feature_spec_alias "
+                "WHERE feature_spec_alias IS NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "UPDATE stage_locks "
+                "SET lock_scope_key = '__none__' "
+                "WHERE lock_scope_key IS NULL OR lock_scope_key = ''"
+            )
+        )
+        conn.execute(
+            text(
+                "DELETE FROM stage_locks "
+                "WHERE id NOT IN ("
+                "  SELECT MAX(id) "
+                "  FROM stage_locks "
+                "  GROUP BY asset_id, stage, lock_scope_key"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_stage_lock_scope_key "
+                "ON stage_locks (asset_id, stage, lock_scope_key)"
+            )
+        )
 
 
 # --- FeatureSpec Immutability Primitive ---
@@ -214,6 +267,7 @@ def create_stage_lock(
         stage=stage,
         worker_id=worker_id,
         feature_spec_alias=feature_spec_alias,
+        lock_scope_key=feature_spec_alias if feature_spec_alias is not None else "__none__",
         acquired_at=now,
         expires_at=now + timedelta(seconds=ttl),
     )

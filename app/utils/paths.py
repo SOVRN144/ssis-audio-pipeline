@@ -49,6 +49,19 @@ def features_h5_path(asset_id: str, feature_spec_alias: str) -> Path:
     return FEATURES_DIR / f"{asset_id}.{feature_spec_alias}.h5"
 
 
+def feature_pack_meta_json_path(asset_id: str, feature_spec_alias: str) -> Path:
+    """Get canonical path for feature pack metadata JSON.
+
+    Args:
+        asset_id: Unique asset identifier.
+        feature_spec_alias: 12-char hex alias from feature_spec_alias().
+
+    Returns:
+        Path: data/features/{asset_id}.{feature_spec_alias}.feature_pack.v1.json
+    """
+    return FEATURES_DIR / f"{asset_id}.{feature_spec_alias}.feature_pack.v1.json"
+
+
 def segments_json_path(asset_id: str) -> Path:
     """Get canonical path for segments JSON file.
 

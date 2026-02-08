@@ -35,10 +35,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 
 from app.config import (
     DEFAULT_FEATURE_SPEC_ID,
@@ -81,6 +82,9 @@ ARTIFACT_TYPE_NORMALIZED_WAV = "normalized_wav"
 # Artifact type for features stage output
 ARTIFACT_TYPE_FEATURES_H5 = "feature_pack"
 
+# Artifact type for feature pack metadata JSON
+ARTIFACT_TYPE_FEATURE_PACK_META_V1 = "feature_pack_meta_v1"
+
 # Artifact type for segments stage output (Step 6)
 ARTIFACT_TYPE_SEGMENTS_V1 = "segments_v1"
 
@@ -97,6 +101,11 @@ PREVIEW_VERSION = "1.0.0"
 
 # Maximum lock reclaim events to store in metrics_json (prevent unbounded growth)
 MAX_LOCK_RECLAIM_EVENTS = 10
+
+
+def _lock_scope_key(feature_spec_alias: str | None) -> str:
+    """Compute non-null lock scope key for StageLock uniqueness."""
+    return feature_spec_alias if feature_spec_alias is not None else "__none__"
 
 
 # --- Metrics Helpers ---
@@ -230,7 +239,8 @@ def _orchestrator_tick_impl(session: Session, asset_id: str) -> dict:
     # This MUST be computed BEFORE lock acquisition to prevent lock-alias mismatch leaks
     feature_spec_alias = None
     if next_stage == STAGE_FEATURES:
-        feature_spec_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        default_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+        feature_spec_alias = _select_features_alias_for_dispatch(session, asset_id, default_alias)
 
     # 5. Check if artifact already exists (skip if so)
     if _artifact_exists(session, asset_id, next_stage, feature_spec_alias):
@@ -483,7 +493,11 @@ def _execute_features_stage(session: Session, job: PipelineJob, asset_id: str) -
         session.flush()
 
     # Run the features worker
-    result = extract_features(session, asset_id)
+    result = extract_features(
+        session,
+        asset_id,
+        feature_spec_alias_override=spec_alias,
+    )
 
     if result.ok:
         # Success - record artifact and update job
@@ -495,6 +509,15 @@ def _execute_features_stage(session: Session, job: PipelineJob, asset_id: str) -
                 result.artifact_path,
                 feature_spec_alias=result.feature_spec_alias,
                 schema_version=result.schema_version or "1.0.0",
+            )
+        if result.metadata_artifact_path:
+            _record_artifact(
+                session,
+                asset_id,
+                ARTIFACT_TYPE_FEATURE_PACK_META_V1,
+                result.metadata_artifact_path,
+                feature_spec_alias=result.feature_spec_alias,
+                schema_version=result.metadata_schema_version or "1.0.0",
             )
 
         # Update job metrics
@@ -659,6 +682,9 @@ def _execute_preview_stage(session: Session, job: PipelineJob, asset_id: str) ->
         # Failure - trigger retry logic
         error_code = result.error_code or "WORKER_ERROR"
         error_message = result.message or "Preview computation failed"
+
+        if result.metrics:
+            _update_job_metrics(session, job, "preview", result.metrics)
 
         logger.warning(
             "Preview failed for asset_id=%s: %s - %s",
@@ -914,22 +940,24 @@ def _find_stage_lock(
     Returns:
         StageLock if found, None otherwise.
     """
-    if feature_spec_alias is None:
-        stmt = select(StageLock).where(
+    scope_key = _lock_scope_key(feature_spec_alias)
+    scope_clause = StageLock.lock_scope_key == scope_key
+    if scope_key == "__none__":
+        scope_clause = or_(
+            StageLock.lock_scope_key == scope_key,
             and_(
-                StageLock.asset_id == asset_id,
-                StageLock.stage == stage,
+                StageLock.lock_scope_key.is_(None),
                 StageLock.feature_spec_alias.is_(None),
-            )
+            ),
         )
-    else:
-        stmt = select(StageLock).where(
-            and_(
-                StageLock.asset_id == asset_id,
-                StageLock.stage == stage,
-                StageLock.feature_spec_alias == feature_spec_alias,
-            )
+
+    stmt = select(StageLock).where(
+        and_(
+            StageLock.asset_id == asset_id,
+            StageLock.stage == stage,
+            scope_clause,
         )
+    )
     return session.execute(stmt).scalar_one_or_none()
 
 
@@ -1109,6 +1137,58 @@ def _record_artifact(
 # --- Job Management ---
 
 
+def _extract_featurepack_missing_alias(job: PipelineJob) -> str | None:
+    """Extract missing feature pack alias from preview failure context."""
+    alias_pattern = re.compile(r"\b([a-f0-9]{12})\b")
+
+    if job.metrics_json:
+        try:
+            metrics_doc = json.loads(job.metrics_json)
+            if isinstance(metrics_doc, dict):
+                preview_metrics = metrics_doc.get("preview")
+                if isinstance(preview_metrics, dict):
+                    alias = preview_metrics.get("spec_alias_used")
+                    if isinstance(alias, str) and alias_pattern.fullmatch(alias):
+                        return alias
+        except (TypeError, json.JSONDecodeError):
+            pass
+
+    if job.error_message:
+        match = alias_pattern.search(job.error_message.lower())
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def _select_features_alias_for_dispatch(
+    session: Session,
+    asset_id: str,
+    default_alias: str,
+) -> str:
+    """Select feature alias for dispatch, including FEATUREPACK_MISSING reroutes."""
+    stmt = (
+        select(PipelineJob)
+        .where(
+            and_(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == STAGE_PREVIEW,
+                PipelineJob.error_code == "FEATUREPACK_MISSING",
+            )
+        )
+        .order_by(PipelineJob.created_at.desc())
+        .limit(1)
+    )
+    preview_missing_job = session.execute(stmt).scalars().first()
+    if preview_missing_job is None:
+        return default_alias
+
+    missing_alias = _extract_featurepack_missing_alias(preview_missing_job)
+    if missing_alias is None:
+        return default_alias
+    return missing_alias
+
+
 def _find_completed_ingest_job(session: Session, asset_id: str) -> PipelineJob | None:
     """Find a completed ingest job for the asset.
 
@@ -1119,14 +1199,19 @@ def _find_completed_ingest_job(session: Session, asset_id: str) -> PipelineJob |
     Returns:
         PipelineJob if found, None otherwise.
     """
-    stmt = select(PipelineJob).where(
-        and_(
-            PipelineJob.asset_id == asset_id,
-            PipelineJob.stage == "ingest",
-            PipelineJob.status == "completed",
+    stmt = (
+        select(PipelineJob)
+        .where(
+            and_(
+                PipelineJob.asset_id == asset_id,
+                PipelineJob.stage == "ingest",
+                PipelineJob.status == "completed",
+            )
         )
+        .order_by(PipelineJob.created_at.desc())
+        .limit(1)
     )
-    return session.execute(stmt).scalar_one_or_none()
+    return session.execute(stmt).scalars().first()
 
 
 def _find_dead_letter_job(session: Session, asset_id: str) -> PipelineJob | None:
@@ -1168,14 +1253,19 @@ def _get_or_create_stage_job(
     Returns:
         The PipelineJob (existing or new).
     """
+    if stage == STAGE_FEATURES and feature_spec_alias is None:
+        feature_spec_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
     # Look for existing job that can be resumed
-    stmt = select(PipelineJob).where(
-        and_(
-            PipelineJob.asset_id == asset_id,
-            PipelineJob.stage == stage,
-            PipelineJob.status.in_(["pending", "queued", "failed", "running"]),
-        )
-    )
+    conditions = [
+        PipelineJob.asset_id == asset_id,
+        PipelineJob.stage == stage,
+        PipelineJob.status.in_(["pending", "queued", "failed", "running"]),
+    ]
+    if stage == STAGE_FEATURES:
+        conditions.append(PipelineJob.feature_spec_alias == feature_spec_alias)
+
+    stmt = select(PipelineJob).where(and_(*conditions))
     existing = session.execute(stmt).scalar_one_or_none()
 
     if existing is not None:
@@ -1198,6 +1288,65 @@ def _get_or_create_stage_job(
     return job
 
 
+def find_assets_needing_tick(session: Session, limit: int = 50) -> list[str]:
+    """Return asset IDs that still require orchestration work.
+
+    Args:
+        session: Database session.
+        limit: Soft cap on how many asset IDs to return.
+
+    Returns:
+        Ordered list of asset IDs that should have orchestrator ticks scheduled.
+    """
+    if limit is not None and limit <= 0:
+        return []
+
+    ingest_assets_sq = (
+        select(PipelineJob.asset_id)
+        .where(
+            PipelineJob.stage == "ingest",
+            PipelineJob.status == "completed",
+        )
+        .distinct()
+        .subquery()
+    )
+
+    dead_letter_sq = (
+        select(PipelineJob.asset_id)
+        .where(PipelineJob.status == "dead_letter")
+        .distinct()
+        .subquery()
+    )
+
+    stmt = (
+        select(ingest_assets_sq.c.asset_id)
+        .outerjoin(
+            dead_letter_sq,
+            ingest_assets_sq.c.asset_id == dead_letter_sq.c.asset_id,
+        )
+        .where(dead_letter_sq.c.asset_id.is_(None))
+        .order_by(ingest_assets_sq.c.asset_id)
+    )
+
+    fetch_limit = (limit * 5) if limit is not None else None
+    if fetch_limit:
+        stmt = stmt.limit(fetch_limit)
+
+    candidate_assets: list[str] = []
+    for asset_id in session.execute(stmt).scalars():
+        if limit is not None and len(candidate_assets) >= limit:
+            break
+
+        # Only enqueue assets that still have pending work.
+        next_stage = _determine_next_stage(session, asset_id)
+        if next_stage is None:
+            continue
+
+        candidate_assets.append(asset_id)
+
+    return candidate_assets
+
+
 def _determine_next_stage(session: Session, asset_id: str) -> str | None:
     """Determine the next stage to process for an asset.
 
@@ -1212,97 +1361,105 @@ def _determine_next_stage(session: Session, asset_id: str) -> str | None:
     """
     # Check if decode is needed
     if not _artifact_exists(session, asset_id, STAGE_DECODE):
-        # Check for running/pending job that hasn't failed too many times
-        stmt = select(PipelineJob).where(
-            and_(
-                PipelineJob.asset_id == asset_id,
-                PipelineJob.stage == STAGE_DECODE,
+        stmt = (
+            select(PipelineJob)
+            .where(
+                and_(
+                    PipelineJob.asset_id == asset_id,
+                    PipelineJob.stage == STAGE_DECODE,
+                )
             )
+            .order_by(PipelineJob.created_at.desc())
+            .limit(1)
         )
-        existing_job = session.execute(stmt).scalar_one_or_none()
-
-        if existing_job is None:
-            return STAGE_DECODE
-
-        # If job is completed but no artifact, something is wrong - still try decode
-        if existing_job.status == "completed":
-            # Artifact check already done above, shouldn't reach here normally
+        existing_job = session.execute(stmt).scalars().first()
+        if existing_job is not None and existing_job.status == "dead_letter":
             return None
-
-        if existing_job.status == "dead_letter":
-            return None  # Don't retry dead-letter
-
-        # pending/failed/running - orchestrator will handle
         return STAGE_DECODE
 
     # Decode complete - check if features is needed (default v1.4 spec)
     default_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
     if not _artifact_exists(session, asset_id, STAGE_FEATURES, default_alias):
-        # Check for running/pending job
-        stmt = select(PipelineJob).where(
-            and_(
-                PipelineJob.asset_id == asset_id,
-                PipelineJob.stage == STAGE_FEATURES,
+        stmt = (
+            select(PipelineJob)
+            .where(
+                and_(
+                    PipelineJob.asset_id == asset_id,
+                    PipelineJob.stage == STAGE_FEATURES,
+                    or_(
+                        PipelineJob.feature_spec_alias == default_alias,
+                        PipelineJob.feature_spec_alias.is_(None),
+                    ),
+                )
             )
+            .order_by(PipelineJob.created_at.desc())
+            .limit(1)
         )
-        existing_job = session.execute(stmt).scalar_one_or_none()
-
-        if existing_job is None:
-            return STAGE_FEATURES
-
-        if existing_job.status == "completed":
+        existing_job = session.execute(stmt).scalars().first()
+        if existing_job is not None and existing_job.status == "dead_letter":
             return None
-
-        if existing_job.status == "dead_letter":
-            return None  # Don't retry dead-letter
-
-        # pending/failed/running - orchestrator will handle
         return STAGE_FEATURES
 
     # Features complete - check if segments is needed (Step 6)
     if not _artifact_exists(session, asset_id, STAGE_SEGMENTS):
-        # Check for running/pending job
-        stmt = select(PipelineJob).where(
-            and_(
-                PipelineJob.asset_id == asset_id,
-                PipelineJob.stage == STAGE_SEGMENTS,
+        stmt = (
+            select(PipelineJob)
+            .where(
+                and_(
+                    PipelineJob.asset_id == asset_id,
+                    PipelineJob.stage == STAGE_SEGMENTS,
+                )
             )
+            .order_by(PipelineJob.created_at.desc())
+            .limit(1)
         )
-        existing_job = session.execute(stmt).scalar_one_or_none()
-
-        if existing_job is None:
-            return STAGE_SEGMENTS
-
-        if existing_job.status == "completed":
+        existing_job = session.execute(stmt).scalars().first()
+        if existing_job is not None and existing_job.status == "dead_letter":
             return None
-
-        if existing_job.status == "dead_letter":
-            return None  # Don't retry dead-letter
-
-        # pending/failed/running - orchestrator will handle
         return STAGE_SEGMENTS
 
     # Segments complete - check if preview is needed (Step 7)
     if not _artifact_exists(session, asset_id, STAGE_PREVIEW):
-        # Check for running/pending job
-        stmt = select(PipelineJob).where(
-            and_(
-                PipelineJob.asset_id == asset_id,
-                PipelineJob.stage == STAGE_PREVIEW,
+        stmt = (
+            select(PipelineJob)
+            .where(
+                and_(
+                    PipelineJob.asset_id == asset_id,
+                    PipelineJob.stage == STAGE_PREVIEW,
+                )
             )
+            .order_by(PipelineJob.created_at.desc())
+            .limit(1)
         )
-        existing_job = session.execute(stmt).scalar_one_or_none()
-
+        existing_job = session.execute(stmt).scalars().first()
         if existing_job is None:
             return STAGE_PREVIEW
-
-        if existing_job.status == "completed":
+        if existing_job.status == "dead_letter":
             return None
 
-        if existing_job.status == "dead_letter":
-            return None  # Don't retry dead-letter
+        if existing_job.error_code == "FEATUREPACK_MISSING":
+            missing_alias = _extract_featurepack_missing_alias(existing_job)
+            if missing_alias is not None:
+                if not _artifact_exists(session, asset_id, STAGE_FEATURES, missing_alias):
+                    return STAGE_FEATURES
+            else:
+                # Alias is unknown: reroute to features at most once.
+                completed_features_stmt = (
+                    select(PipelineJob)
+                    .where(
+                        and_(
+                            PipelineJob.asset_id == asset_id,
+                            PipelineJob.stage == STAGE_FEATURES,
+                            PipelineJob.status == "completed",
+                        )
+                    )
+                    .order_by(PipelineJob.created_at.desc())
+                    .limit(1)
+                )
+                completed_features = session.execute(completed_features_stmt).scalars().first()
+                if completed_features is None:
+                    return STAGE_FEATURES
 
-        # pending/failed/running - orchestrator will handle
         return STAGE_PREVIEW
 
     # All stages complete

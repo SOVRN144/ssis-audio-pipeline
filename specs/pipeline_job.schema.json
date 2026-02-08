@@ -47,7 +47,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["pending", "running", "completed", "failed", "dead_letter"],
+      "enum": ["pending", "queued", "running", "completed", "failed", "dead_letter"],
       "description": "Current job status"
     },
     "attempt": {

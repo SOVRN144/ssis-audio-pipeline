@@ -6,6 +6,7 @@ Per Blueprint section 8:
 - If owner_entity_id is null: non-idempotent, always creates new asset
 """
 
+import json
 import tempfile
 import wave
 from pathlib import Path
@@ -82,6 +83,25 @@ class TestIdempotentIngest:
             job_count_stmt = select(func.count()).select_from(PipelineJob)
             job_count = session.execute(job_count_stmt).scalar()
             assert job_count == 2
+
+            # Duplicate ingest should still write ingest metrics
+            latest_job_stmt = (
+                select(PipelineJob)
+                .where(PipelineJob.asset_id == data2["asset_id"], PipelineJob.stage == "ingest")
+                .order_by(PipelineJob.created_at.desc())
+                .limit(1)
+            )
+            latest_job = session.execute(latest_job_stmt).scalar_one()
+            assert latest_job.metrics_json is not None
+            metrics_doc = (
+                latest_job.metrics_json
+                if isinstance(latest_job.metrics_json, dict)
+                else json.loads(latest_job.metrics_json)
+            )
+            assert "ingest" in metrics_doc
+            ingest_metrics = metrics_doc["ingest"]
+            for key in ("file_size_bytes", "content_hash", "hash_time_ms", "format_guess"):
+                assert key in ingest_metrics
         finally:
             session.close()
 

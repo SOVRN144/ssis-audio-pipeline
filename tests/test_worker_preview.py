@@ -240,6 +240,40 @@ class TestFeatureSpecSelectionRule:
         assert result.error_code == PreviewErrorCode.FEATUREPACK_MISSING.value
         assert "spec_alias_used" in result.metrics
 
+    def test_env_alias_missing_falls_back_to_default_pack(self, temp_data_dir, monkeypatch):
+        """If env alias pack is missing, preview should fall back to default alias."""
+        tmpdir, data_dir, audio_dir, features_dir, segments_dir, preview_dir = temp_data_dir
+        asset_id = "test-env-fallback-default"
+        default_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.SEGMENTS_DIR", segments_dir)
+        monkeypatch.setattr("app.utils.paths.PREVIEW_DIR", preview_dir)
+        monkeypatch.setattr("app.config.PREVIEW_DIR", preview_dir)
+
+        asset_dir = audio_dir / asset_id
+        _create_test_wav(asset_dir / "normalized.wav", duration_sec=120.0)
+        segments_path = segments_dir / f"{asset_id}.segments.v1.json"
+        _create_test_segments(segments_path, duration_sec=120.0)
+
+        # Create only the default FeaturePack (not the env override alias pack)
+        features_path = features_dir / f"{asset_id}.{default_alias}.h5"
+        _create_test_h5(features_path, duration_sec=120.0)
+
+        env_backup = os.environ.get(FEATURE_SPEC_ALIAS_ENV)
+        try:
+            os.environ[FEATURE_SPEC_ALIAS_ENV] = "abcdef123456"
+            result = run_preview_worker(asset_id)
+        finally:
+            if env_backup is None:
+                os.environ.pop(FEATURE_SPEC_ALIAS_ENV, None)
+            else:
+                os.environ[FEATURE_SPEC_ALIAS_ENV] = env_backup
+
+        assert result.ok
+        assert result.metrics["spec_alias_used"] == default_alias
+
 
 # --- Test B: Candidate Boundaries ---
 
@@ -413,6 +447,7 @@ class TestFallbackPath:
         # Verify fallback metrics
         assert result.metrics["fallback_used"] is True
         assert result.metrics["mode"] in ("intro", "fallback")
+        assert result.metrics["taxonomy_code"] == PreviewErrorCode.PREVIEW_LOW_CONF.value
 
     def test_fallback_metrics_correct(self, temp_data_dir, monkeypatch):
         """Test that fallback metrics are recorded correctly."""
@@ -446,6 +481,41 @@ class TestFallbackPath:
         assert "best_score" in result.metrics
         assert "fallback_used" in result.metrics
         assert "mode" in result.metrics
+
+    def test_smart_mode_does_not_emit_low_conf_taxonomy(self, temp_data_dir, monkeypatch):
+        """Smart mode should not emit PREVIEW_LOW_CONF taxonomy."""
+        tmpdir, data_dir, audio_dir, features_dir, segments_dir, preview_dir = temp_data_dir
+        asset_id = "test-smart-no-low-conf"
+        spec_alias = compute_feature_spec_alias(DEFAULT_FEATURE_SPEC_ID)
+
+        monkeypatch.setattr("app.utils.paths.AUDIO_DIR", audio_dir)
+        monkeypatch.setattr("app.utils.paths.FEATURES_DIR", features_dir)
+        monkeypatch.setattr("app.utils.paths.SEGMENTS_DIR", segments_dir)
+        monkeypatch.setattr("app.utils.paths.PREVIEW_DIR", preview_dir)
+        monkeypatch.setattr("app.config.PREVIEW_DIR", preview_dir)
+
+        asset_dir = audio_dir / asset_id
+        _create_test_wav(asset_dir / "normalized.wav", duration_sec=120.0)
+        segments_path = segments_dir / f"{asset_id}.segments.v1.json"
+        _create_test_segments(segments_path, duration_sec=120.0)
+        features_path = features_dir / f"{asset_id}.{spec_alias}.h5"
+        _create_test_h5(features_path, duration_sec=120.0)
+
+        def mock_score(candidates):
+            for c in candidates:
+                c.score = 0.95
+            return candidates
+
+        with mock.patch(
+            "services.worker_preview.run._score_candidates",
+            side_effect=mock_score,
+        ):
+            result = run_preview_worker(asset_id)
+
+        assert result.ok
+        assert result.metrics["fallback_used"] is False
+        assert result.metrics["mode"] == "smart"
+        assert "taxonomy_code" not in result.metrics
 
 
 # --- Test E: Schema + Invariants Gate ---

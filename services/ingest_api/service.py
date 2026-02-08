@@ -9,8 +9,10 @@ Core ingest business logic implementing:
 
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -148,20 +150,34 @@ def ingest_local_file(
 
     # 2. Compute content hash
     try:
+        hash_start = time.monotonic()
         content_hash = sha256_file(source_path)
+        hash_time_ms = int((time.monotonic() - hash_start) * 1000)
     except Exception as e:
         raise HashFailedError(str(source_path), str(e)) from e
 
     # 3. Determine effective filename and extension
     effective_filename = original_filename or source_path.name
     ext = guess_format_from_extension(effective_filename) or "bin"
+    file_size_bytes = source_path.stat().st_size
+    ingest_metrics = {
+        "file_size_bytes": file_size_bytes,
+        "content_hash": content_hash,
+        "hash_time_ms": hash_time_ms,
+        "format_guess": ext,
+    }
 
     # 4. Check idempotency (only if owner_entity_id is provided)
     if owner_entity_id is not None:
         existing = _find_existing_asset(session, owner_entity_id, content_hash)
         if existing is not None:
             # Asset already exists - create job record and return
-            job_id = _create_ingest_job(session, existing.asset_id, status="completed")
+            job_id = _create_ingest_job(
+                session,
+                existing.asset_id,
+                status="completed",
+                ingest_metrics=ingest_metrics,
+            )
             session.commit()
             return IngestResult(
                 asset_id=existing.asset_id,
@@ -202,7 +218,12 @@ def ingest_local_file(
     session.add(asset)
 
     # 10. Create PipelineJob record
-    job_id = _create_ingest_job(session, asset_id, status="completed")
+    job_id = _create_ingest_job(
+        session,
+        asset_id,
+        status="completed",
+        ingest_metrics=ingest_metrics,
+    )
 
     # 11. Commit transaction (all or nothing)
     try:
@@ -280,16 +301,30 @@ def ingest_upload_stream(
     try:
         # 3. Compute content hash
         try:
+            hash_start = time.monotonic()
             content_hash = sha256_file(tmp_path)
+            hash_time_ms = int((time.monotonic() - hash_start) * 1000)
         except Exception as e:
             raise HashFailedError(str(tmp_path), str(e)) from e
 
         # 4. Check idempotency (only if owner_entity_id is provided)
+        file_size_bytes = tmp_path.stat().st_size
+        ingest_metrics = {
+            "file_size_bytes": file_size_bytes,
+            "content_hash": content_hash,
+            "hash_time_ms": hash_time_ms,
+            "format_guess": ext,
+        }
         if owner_entity_id is not None:
             existing = _find_existing_asset(session, owner_entity_id, content_hash)
             if existing is not None:
                 # Asset already exists - create job record and return
-                job_id = _create_ingest_job(session, existing.asset_id, status="completed")
+                job_id = _create_ingest_job(
+                    session,
+                    existing.asset_id,
+                    status="completed",
+                    ingest_metrics=ingest_metrics,
+                )
                 session.commit()
                 return IngestResult(
                     asset_id=existing.asset_id,
@@ -328,7 +363,12 @@ def ingest_upload_stream(
         session.add(asset)
 
         # 10. Create PipelineJob record
-        job_id = _create_ingest_job(session, asset_id, status="completed")
+        job_id = _create_ingest_job(
+            session,
+            asset_id,
+            status="completed",
+            ingest_metrics=ingest_metrics,
+        )
 
         # 11. Commit transaction
         try:
@@ -426,6 +466,7 @@ def _create_ingest_job(
     status: str,
     error_code: str | None = None,
     error_message: str | None = None,
+    ingest_metrics: dict[str, Any] | None = None,
 ) -> str:
     """Create a PipelineJob record for the ingest stage.
 
@@ -452,6 +493,7 @@ def _create_ingest_job(
         finished_at=now,
         error_code=error_code,
         error_message=error_message,
+        metrics_json=json.dumps({"ingest": ingest_metrics}) if ingest_metrics else None,
     )
     session.add(job)
     session.flush()

@@ -766,10 +766,9 @@ class TestRequiredMetricsKeys:
         assert hasattr(metrics, "chunk_count"), "Missing chunk_count"
         assert hasattr(metrics, "decode_time_ms"), "Missing decode_time_ms"
 
-    # NOTE: Features, segments, and preview metrics validation has been moved to
-    # runtime tests (TestRuntimeTelemetry) which verify actual DB metrics_json
-    # after worker execution. The previous tests were circular (assigning dict
-    # then asserting keys exist).
+    # NOTE: Features, segments, and preview metrics validation is covered by
+    # runtime tests (TestRuntimeTelemetry) that parse real worker-emitted metrics
+    # from subprocess CLI execution.
 
 
 # --- Test: CLI Entrypoints Exist ---
@@ -809,41 +808,6 @@ class TestCLIEntrypoints:
         assert re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]', content), (
             "Preview worker missing CLI entrypoint"
         )
-
-
-# --- Helper for Runtime Telemetry Tests ---
-
-
-def get_latest_job_metrics(SessionFactory, asset_id: str, stage: str) -> dict:
-    """Retrieve metrics_json from the most recent PipelineJob for given asset and stage.
-
-    Args:
-        SessionFactory: SQLAlchemy session factory.
-        asset_id: The asset ID.
-        stage: Pipeline stage name (decode, features, segments, preview).
-
-    Returns:
-        Parsed metrics dictionary.
-
-    Raises:
-        AssertionError: If no job found or metrics_json is missing.
-    """
-    session = SessionFactory()
-    try:
-        job = (
-            session.query(PipelineJob)
-            .filter(PipelineJob.asset_id == asset_id, PipelineJob.stage == stage)
-            .order_by(PipelineJob.finished_at.desc())
-            .first()
-        )
-        assert job is not None, f"Missing PipelineJob for stage={stage}"
-        assert job.metrics_json is not None, f"Missing metrics_json for stage={stage}"
-        metrics = (
-            job.metrics_json if isinstance(job.metrics_json, dict) else json.loads(job.metrics_json)
-        )
-        return metrics
-    finally:
-        session.close()
 
 
 # --- Helper for HDF5 Determinism ---
@@ -1197,6 +1161,7 @@ sys.exit(0 if result.ok else 1)
         # Run features worker
         features_script = cli_script(f"""
 import sys
+import json
 from pathlib import Path
 sys.path.insert(0, {py_literal(repo_root)})
 
@@ -1211,13 +1176,17 @@ app.utils.paths.FEATURES_DIR = Path({py_literal(features_dir)})
 
 from services.worker_features.run import run_features_worker
 result = run_features_worker({py_literal(asset_id)})
-sys.exit(0 if result.ok else 1)
+if result.ok:
+    print("METRICS:" + json.dumps(result.metrics))
+    sys.exit(0)
+sys.exit(1)
         """)
 
-        run_cli(features_script, timeout=120, label="features")
-
-        # Verify DB metrics
-        metrics = get_latest_job_metrics(SessionFactory, asset_id, "features")
+        result = run_cli(features_script, timeout=120, label="features")
+        stdout = result.stdout.decode()
+        metrics_line = [line for line in stdout.split("\n") if line.startswith("METRICS:")]
+        assert len(metrics_line) == 1, "Should have features metrics output"
+        metrics = json.loads(metrics_line[0].replace("METRICS:", ""))
 
         # Section 10: "features: inference time, mel/embedding shapes, NaN/Inf count, spec alias/id"
         required_keys = [
@@ -1263,6 +1232,7 @@ sys.exit(0 if result.ok else 1)
         # Run segments worker
         segments_script = cli_script(f"""
 import sys
+import json
 from pathlib import Path
 sys.path.insert(0, {py_literal(repo_root)})
 
@@ -1277,13 +1247,17 @@ app.utils.paths.SEGMENTS_DIR = Path({py_literal(segments_dir)})
 
 from services.worker_segments.run import run_segments_worker
 result = run_segments_worker({py_literal(asset_id)})
-sys.exit(0 if result.ok else 1)
+if result.ok:
+    print("METRICS:" + json.dumps(result.metrics))
+    sys.exit(0)
+sys.exit(1)
         """)
 
-        run_cli(segments_script, timeout=120, label="segments")
-
-        # Verify DB metrics
-        metrics = get_latest_job_metrics(SessionFactory, asset_id, "segments")
+        result = run_cli(segments_script, timeout=120, label="segments")
+        stdout = result.stdout.decode()
+        metrics_line = [line for line in stdout.split("\n") if line.startswith("METRICS:")]
+        assert len(metrics_line) == 1, "Should have segments metrics output"
+        metrics = json.loads(metrics_line[0].replace("METRICS:", ""))
 
         # Section 10: "segments: segment count, class distribution, flip rate"
         required_keys = ["segment_count", "class_distribution", "flip_rate"]
@@ -1366,6 +1340,7 @@ sys.exit(0 if result.ok else 1)
         # Run preview worker
         preview_script = cli_script(f"""
 import sys
+import json
 from pathlib import Path
 sys.path.insert(0, {py_literal(repo_root)})
 
@@ -1384,13 +1359,17 @@ app.utils.paths.PREVIEW_DIR = Path({py_literal(preview_dir)})
 
 from services.worker_preview.run import run_preview_worker
 result = run_preview_worker({py_literal(asset_id)})
-sys.exit(0 if result.ok else 1)
+if result.ok:
+    print("METRICS:" + json.dumps(result.metrics))
+    sys.exit(0)
+sys.exit(1)
         """)
 
-        run_cli(preview_script, timeout=120, label="preview")
-
-        # Verify DB metrics
-        metrics = get_latest_job_metrics(SessionFactory, asset_id, "preview")
+        result = run_cli(preview_script, timeout=120, label="preview")
+        stdout = result.stdout.decode()
+        metrics_line = [line for line in stdout.split("\n") if line.startswith("METRICS:")]
+        assert len(metrics_line) == 1, "Should have preview metrics output"
+        metrics = json.loads(metrics_line[0].replace("METRICS:", ""))
 
         # Section 10: "preview: candidate count, best score, fallback_used, spec alias used"
         required_keys = ["candidate_count", "best_score", "fallback_used", "spec_alias_used"]

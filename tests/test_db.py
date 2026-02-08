@@ -1,12 +1,14 @@
 """Tests for app.db module and FeatureSpec immutability."""
 
+import sqlite3
 import tempfile
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.config import STAGE_LOCK_TTL_SECONDS
 from app.db import (
@@ -66,6 +68,66 @@ class TestInitDb:
         tables = inspector.get_table_names()
         assert "audio_assets" in tables
         engine2.dispose()
+
+    def test_stage_lock_scope_key_migration_dedupes_legacy_rows(self):
+        """Legacy stage_locks rows should be backfilled/deduped with lock_scope_key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "legacy.db"
+
+            # Simulate legacy SQLite table (no lock_scope_key, nullable alias uniqueness gap).
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE stage_locks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id VARCHAR(64) NOT NULL,
+                    stage VARCHAR(32) NOT NULL,
+                    feature_spec_alias VARCHAR(12),
+                    worker_id VARCHAR(64) NOT NULL,
+                    acquired_at DATETIME NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    CONSTRAINT uq_stage_lock_key UNIQUE (asset_id, stage, feature_spec_alias)
+                )
+                """
+            )
+            now = "2026-02-08T00:00:00+00:00"
+            conn.execute(
+                """
+                INSERT INTO stage_locks
+                (asset_id, stage, feature_spec_alias, worker_id, acquired_at, expires_at)
+                VALUES
+                ('asset-1', 'decode', NULL, 'worker-old-1', ?, ?),
+                ('asset-1', 'decode', NULL, 'worker-old-2', ?, ?),
+                ('asset-1', 'features', 'abc123def456', 'worker-feat', ?, ?)
+                """,
+                (now, now, now, now, now, now),
+            )
+            conn.commit()
+            conn.close()
+
+            engine, SessionFactory = init_db(db_path)
+            session = SessionFactory()
+            try:
+                rows = session.execute(
+                    select(StageLock).where(StageLock.asset_id == "asset-1").order_by(StageLock.id)
+                ).scalars()
+                rows = list(rows)
+
+                # Duplicate NULL-alias rows should be collapsed to one, alias row should remain.
+                assert len(rows) == 2
+                assert sum(1 for row in rows if row.stage == "decode") == 1
+                assert sum(1 for row in rows if row.stage == "features") == 1
+
+                decode_row = next(row for row in rows if row.stage == "decode")
+                features_row = next(row for row in rows if row.stage == "features")
+                assert decode_row.lock_scope_key == "__none__"
+                assert features_row.lock_scope_key == "abc123def456"
+
+                indexes = session.execute(text("PRAGMA index_list(stage_locks)")).all()
+                assert any(idx[1] == "uq_stage_lock_scope_key" and idx[2] == 1 for idx in indexes)
+            finally:
+                session.close()
+                engine.dispose()
 
 
 class TestRegisterFeatureSpec:
@@ -320,5 +382,43 @@ class TestCreateStageLock:
             assert retrieved.worker_id == "worker-004"
             assert retrieved.expires_at is not None
             assert retrieved.expires_at > retrieved.acquired_at
+        finally:
+            session.close()
+
+    def test_null_alias_lock_uniqueness_enforced(self, temp_db):
+        """Second (asset_id, stage, NULL) lock insert must fail under lock_scope_key index."""
+        _, _, SessionFactory = temp_db
+        session = SessionFactory()
+
+        try:
+            create_stage_lock(
+                session,
+                asset_id="asset-lock-null-1",
+                stage="decode",
+                worker_id="worker-1",
+                feature_spec_alias=None,
+            )
+            session.commit()
+
+            with pytest.raises(IntegrityError):
+                create_stage_lock(
+                    session,
+                    asset_id="asset-lock-null-1",
+                    stage="decode",
+                    worker_id="worker-2",
+                    feature_spec_alias=None,
+                )
+
+            session.rollback()
+
+            rows = session.execute(
+                select(StageLock).where(
+                    StageLock.asset_id == "asset-lock-null-1",
+                    StageLock.stage == "decode",
+                )
+            ).scalars()
+            rows = list(rows)
+            assert len(rows) == 1
+            assert rows[0].lock_scope_key == "__none__"
         finally:
             session.close()
