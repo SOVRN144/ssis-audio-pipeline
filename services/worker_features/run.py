@@ -512,9 +512,7 @@ def _ensure_feature_pack_metadata_from_h5(
         spec_alias = str(attr_spec_alias) if attr_spec_alias is not None else fallback_spec_alias
         model_sha256 = str(attr_model_hash) if attr_model_hash is not None else None
         computed_at = (
-            str(attr_computed_at)
-            if attr_computed_at is not None
-            else datetime.now(UTC).isoformat()
+            str(attr_computed_at) if attr_computed_at is not None else datetime.now(UTC).isoformat()
         )
 
         mel_shape = list(f["melspec"].shape) if "melspec" in f else None

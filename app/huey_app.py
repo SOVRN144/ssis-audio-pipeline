@@ -151,9 +151,7 @@ def orchestrator_sweep_task() -> dict:
         for asset_id in asset_ids:
             orchestrator_tick_task(asset_id)
 
-        logger.info(
-            "Orchestrator sweep enqueued %d assets for orchestration", len(asset_ids)
-        )
+        logger.info("Orchestrator sweep enqueued %d assets for orchestration", len(asset_ids))
         return {"enqueued": len(asset_ids), "asset_ids": asset_ids}
     except Exception:
         logger.exception("Orchestrator sweep failed")
