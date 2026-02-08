@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -494,6 +495,189 @@ os.replace(temp_path, "{final_path}")
             assert result.returncode == 42
             assert temp_path.exists(), "Temp file should exist"
             assert not final_path.exists(), "Final file should not exist"
+
+
+class TestRestartRecoveryHarness:
+    """Kill -> restart correctness checks using lightweight subprocess scripts."""
+
+    def test_decode_kill_restart_completes_and_dedupes(self):
+        """Decode-style atomic publish should recover without duplicate jobs/artifacts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(__file__).parent.parent
+            db_path = Path(tmpdir) / "decode_restart.db"
+            final_path = Path(tmpdir) / "audio" / "asset-1" / "normalized.wav"
+            temp_path = final_path.with_suffix(".wav.tmp")
+
+            script = f"""
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "{repo_root}")
+from app.utils.failpoints import maybe_fail
+
+db_path = Path("{db_path}")
+final_path = Path("{final_path}")
+temp_path = Path("{temp_path}")
+final_path.parent.mkdir(parents=True, exist_ok=True)
+
+conn = sqlite3.connect(db_path)
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS pipeline_jobs ("
+    "stage TEXT PRIMARY KEY, status TEXT NOT NULL, attempt INTEGER NOT NULL)"
+)
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS artifact_index ("
+    "artifact_type TEXT PRIMARY KEY, artifact_path TEXT NOT NULL)"
+)
+conn.execute(
+    "INSERT OR IGNORE INTO pipeline_jobs(stage, status, attempt) "
+    "VALUES ('decode', 'running', 1)"
+)
+conn.commit()
+
+with open(temp_path, "wb") as f:
+    f.write(b"RIFF....WAVEfmt ")
+    f.flush()
+    os.fsync(f.fileno())
+
+maybe_fail("DECODE_BEFORE_FINAL_RENAME")
+
+os.replace(temp_path, final_path)
+try:
+    dir_fd = os.open(final_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    os.fsync(dir_fd)
+    os.close(dir_fd)
+except Exception:
+    pass
+
+conn.execute("UPDATE pipeline_jobs SET status='completed' WHERE stage='decode'")
+conn.execute(
+    "INSERT OR IGNORE INTO artifact_index(artifact_type, artifact_path) "
+    "VALUES ('normalized_wav', ?)",
+    (str(final_path),),
+)
+conn.commit()
+conn.close()
+print("OK")
+"""
+
+            fail_result = run_with_failpoint(script, "DECODE_BEFORE_FINAL_RENAME")
+            assert fail_result.returncode == 42
+            assert temp_path.exists(), "Temp file should exist after kill"
+            assert not final_path.exists(), "Final artifact should not exist after kill"
+
+            restart_result = run_without_failpoint(script)
+            assert restart_result.returncode == 0, restart_result.stderr.decode()
+            assert b"OK" in restart_result.stdout
+
+            # A second clean restart should remain idempotent.
+            second_restart = run_without_failpoint(script)
+            assert second_restart.returncode == 0, second_restart.stderr.decode()
+
+            assert final_path.exists(), "Final artifact should exist after restart"
+            assert not temp_path.exists(), "Temp file should be cleaned after restart"
+
+            with sqlite3.connect(db_path) as conn:
+                job_count = conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0]
+                artifact_count = conn.execute("SELECT COUNT(*) FROM artifact_index").fetchone()[0]
+                job_status = conn.execute(
+                    "SELECT status FROM pipeline_jobs WHERE stage='decode'"
+                ).fetchone()[0]
+
+            assert job_count == 1
+            assert artifact_count == 1
+            assert job_status == "completed"
+
+    def test_features_kill_restart_completes_and_dedupes(self):
+        """Features-style .h5.tmp publish should recover without duplicate records."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(__file__).parent.parent
+            db_path = Path(tmpdir) / "features_restart.db"
+            final_path = Path(tmpdir) / "features" / "asset-1.abc123def456.h5"
+            temp_path = final_path.with_suffix(".h5.tmp")
+
+            script = f"""
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "{repo_root}")
+from app.utils.failpoints import maybe_fail
+
+db_path = Path("{db_path}")
+final_path = Path("{final_path}")
+temp_path = Path("{temp_path}")
+final_path.parent.mkdir(parents=True, exist_ok=True)
+
+conn = sqlite3.connect(db_path)
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS pipeline_jobs ("
+    "stage TEXT PRIMARY KEY, status TEXT NOT NULL, attempt INTEGER NOT NULL)"
+)
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS artifact_index ("
+    "artifact_type TEXT PRIMARY KEY, artifact_path TEXT NOT NULL)"
+)
+conn.execute(
+    "INSERT OR IGNORE INTO pipeline_jobs(stage, status, attempt) "
+    "VALUES ('features', 'running', 1)"
+)
+conn.commit()
+
+with open(temp_path, "wb") as f:
+    f.write(b"HDF5TESTCONTENT")
+    f.flush()
+    os.fsync(f.fileno())
+
+maybe_fail("FEATURES_BEFORE_H5_RENAME")
+
+os.replace(temp_path, final_path)
+try:
+    dir_fd = os.open(final_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    os.fsync(dir_fd)
+    os.close(dir_fd)
+except Exception:
+    pass
+
+conn.execute("UPDATE pipeline_jobs SET status='completed' WHERE stage='features'")
+conn.execute(
+    "INSERT OR IGNORE INTO artifact_index(artifact_type, artifact_path) "
+    "VALUES ('feature_pack', ?)",
+    (str(final_path),),
+)
+conn.commit()
+conn.close()
+print("OK")
+"""
+
+            fail_result = run_with_failpoint(script, "FEATURES_BEFORE_H5_RENAME")
+            assert fail_result.returncode == 42
+            assert temp_path.exists(), "Temp H5 should exist after kill"
+            assert not final_path.exists(), "Final H5 should not exist after kill"
+
+            restart_result = run_without_failpoint(script)
+            assert restart_result.returncode == 0, restart_result.stderr.decode()
+            assert b"OK" in restart_result.stdout
+
+            second_restart = run_without_failpoint(script)
+            assert second_restart.returncode == 0, second_restart.stderr.decode()
+
+            assert final_path.exists(), "Final H5 should exist after restart"
+            assert not temp_path.exists(), "Temp H5 should be cleaned after restart"
+
+            with sqlite3.connect(db_path) as conn:
+                job_count = conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0]
+                artifact_count = conn.execute("SELECT COUNT(*) FROM artifact_index").fetchone()[0]
+                job_status = conn.execute(
+                    "SELECT status FROM pipeline_jobs WHERE stage='features'"
+                ).fetchone()[0]
+
+            assert job_count == 1
+            assert artifact_count == 1
+            assert job_status == "completed"
 
 
 # --- Test 7: E2E smoke test ---

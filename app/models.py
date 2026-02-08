@@ -146,6 +146,9 @@ class StageLock(Base):
     asset_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
     feature_spec_alias: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    # Non-null lock scope key used for SQLite-safe uniqueness enforcement:
+    # feature_spec_alias if present, otherwise "__none__".
+    lock_scope_key: Mapped[str] = mapped_column(String(12), nullable=False, default="__none__")
 
     # Lock holder
     worker_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -161,6 +164,7 @@ class StageLock(Base):
     # Unique constraint on lock key (with nullable feature_spec_alias)
     __table_args__ = (
         UniqueConstraint("asset_id", "stage", "feature_spec_alias", name="uq_stage_lock_key"),
+        Index("uq_stage_lock_scope_key", "asset_id", "stage", "lock_scope_key", unique=True),
         Index("ix_locks_acquired_at", "acquired_at"),
         Index("ix_locks_expires_at", "expires_at"),
     )

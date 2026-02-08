@@ -6,6 +6,7 @@ from app.config import AUDIO_DIR, FEATURES_DIR, PREVIEW_DIR, SEGMENTS_DIR
 from app.utils.paths import (
     audio_normalized_path,
     audio_original_path,
+    feature_pack_meta_json_path,
     features_h5_path,
     preview_json_path,
     segments_json_path,
@@ -81,6 +82,26 @@ class TestFeaturesH5Path:
     def test_returns_path_object(self):
         """Should return a Path object."""
         path = features_h5_path("asset", "alias")
+        assert isinstance(path, Path)
+
+
+class TestFeaturePackMetaJsonPath:
+    """Tests for feature_pack_meta_json_path function."""
+
+    def test_basic_path(self):
+        """Should return correct canonical metadata path."""
+        path = feature_pack_meta_json_path("asset123", "abcd12345678")
+        expected = FEATURES_DIR / "asset123.abcd12345678.feature_pack.v1.json"
+        assert path == expected
+
+    def test_always_json(self):
+        """Metadata path should always have .json extension."""
+        path = feature_pack_meta_json_path("asset", "alias12345678")
+        assert path.suffix == ".json"
+
+    def test_returns_path_object(self):
+        """Should return a Path object."""
+        path = feature_pack_meta_json_path("asset", "alias")
         assert isinstance(path, Path)
 
 
@@ -208,6 +229,12 @@ class TestBlueprintCanonicalPathPatterns:
         parts = path.stem.split(".")
         assert parts[0] == self.ASSET_ID
         assert parts[1] == self.FEATURE_SPEC_ALIAS
+
+    def test_feature_pack_metadata_matches_blueprint_pattern(self):
+        """Verify: data/features/{asset_id}.{feature_spec_alias}.feature_pack.v1.json"""
+        path = feature_pack_meta_json_path(self.ASSET_ID, self.FEATURE_SPEC_ALIAS)
+        assert path.parent == FEATURES_DIR
+        assert path.name == f"{self.ASSET_ID}.{self.FEATURE_SPEC_ALIAS}.feature_pack.v1.json"
 
     def test_segments_matches_blueprint_pattern(self):
         """Verify: data/segments/{asset_id}.segments.v1.json"""

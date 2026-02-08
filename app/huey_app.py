@@ -17,11 +17,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from huey import SqliteHuey
+from huey import SqliteHuey, crontab
 
 from app.config import HUEY_DB_PATH, QUEUE_DIR
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of assets to enqueue per periodic sweep to avoid hammering.
+SWEEP_BATCH_LIMIT = 50
 
 
 def _ensure_queue_dir() -> None:
@@ -121,3 +124,37 @@ def enqueue_stage_worker(job_id: str, asset_id: str, stage: str, delay_seconds: 
         stage_worker_task.schedule((job_id, asset_id, stage), delay=delay_seconds)
     else:
         stage_worker_task(job_id, asset_id, stage)
+
+
+@huey.periodic_task(crontab(minute="*"))
+def orchestrator_sweep_task() -> dict:
+    """Periodic sweep that enqueues orchestrator ticks for assets needing work.
+
+    Huey invokes this task with no arguments. The sweep inspects the database to
+    find assets that have completed ingest, have not been dead-lettered, and
+    still have stages remaining, then enqueues orchestrator ticks for a bounded
+    batch of those assets.
+    """
+    from app.db import init_db
+    from app.orchestrator import find_assets_needing_tick
+
+    _, SessionFactory = init_db()
+    session = SessionFactory()
+
+    try:
+        asset_ids = find_assets_needing_tick(session, limit=SWEEP_BATCH_LIMIT)
+
+        if not asset_ids:
+            logger.debug("Orchestrator sweep found no assets needing work")
+            return {"enqueued": 0, "asset_ids": []}
+
+        for asset_id in asset_ids:
+            orchestrator_tick_task(asset_id)
+
+        logger.info("Orchestrator sweep enqueued %d assets for orchestration", len(asset_ids))
+        return {"enqueued": len(asset_ids), "asset_ids": asset_ids}
+    except Exception:
+        logger.exception("Orchestrator sweep failed")
+        raise
+    finally:
+        session.close()

@@ -35,7 +35,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
@@ -66,7 +66,7 @@ WORKER_STAGE = STAGE_SEGMENTS
 # --- Error Codes ---
 
 
-class SegmentsErrorCode(str, Enum):
+class SegmentsErrorCode(StrEnum):
     """Error codes for segments stage per Blueprint section 8."""
 
     INPUT_NOT_FOUND = "INPUT_NOT_FOUND"
@@ -86,6 +86,10 @@ OOM_ERROR_PATTERN = (
     r"metal out of memory)"
 )
 OOM_ERROR_RE = re.compile(OOM_ERROR_PATTERN, re.IGNORECASE)
+SEGMENTER_STACK_COMPAT_RE = re.compile(
+    r'arrays to stack must be passed as a "sequence" type',
+    re.IGNORECASE,
+)
 
 
 def _looks_like_oom(exc: BaseException | str) -> bool:
@@ -101,6 +105,20 @@ def _map_exception_to_error_code(exc: BaseException) -> SegmentsErrorCode:
     if _looks_like_oom(exc):
         return SegmentsErrorCode.MODEL_OOM
     return SegmentsErrorCode.SEGMENTATION_FAILED
+
+
+def _is_segmenter_stack_compat_error(exc: BaseException) -> bool:
+    """Return True for known inaSpeechSegmenter/pyannote stack incompatibility errors."""
+    if not isinstance(exc, TypeError):
+        return False
+    return bool(SEGMENTER_STACK_COMPAT_RE.search(str(exc)))
+
+
+def _compat_fallback_raw_segments(total_duration: float) -> list[tuple[str, float, float]]:
+    """Build deterministic fallback raw segments when third-party segmenter is incompatible."""
+    if total_duration <= 0:
+        return []
+    return [("speech", 0.0, total_duration)]
 
 
 # --- Result Types ---
@@ -641,6 +659,7 @@ def _compute_metrics(
     segments: list[SegmentData],
     total_duration: float,
     segmentation_time_ms: int,
+    source: str = SEGMENT_SOURCE,
 ) -> dict[str, Any]:
     """Compute segment metrics.
 
@@ -682,7 +701,7 @@ def _compute_metrics(
         "class_distribution": class_distribution,
         "flip_rate": flip_rate,
         "segmentation_time_ms": segmentation_time_ms,
-        "source": SEGMENT_SOURCE,
+        "source": source,
         "schema_id": SEGMENTS_SCHEMA_ID,
         "version": SEGMENTS_VERSION,
     }
@@ -801,22 +820,33 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
         )
 
     segmenter_fn = _resolve_segmenter_callable()
+    segment_source = SEGMENT_SOURCE
     try:
         raw_segments = segmenter_fn(input_path)
     except Exception as exc:  # pragma: no cover - exercised via tests
-        error_code = _map_exception_to_error_code(exc)
-        prefix = (
-            "Out of memory during segmentation"
-            if error_code == SegmentsErrorCode.MODEL_OOM
-            else "Segmentation failed"
-        )
-        logger.exception("Segmentation error for asset_id=%s", asset_id)
-        return _error_result(
-            asset_id,
-            exc,
-            error_code.value,
-            prefix,
-        )
+        if _is_segmenter_stack_compat_error(exc):
+            logger.warning(
+                "inaSpeechSegmenter compatibility failure for asset_id=%s; "
+                "using deterministic fallback segmentation: %s",
+                asset_id,
+                exc,
+            )
+            raw_segments = _compat_fallback_raw_segments(total_duration)
+            segment_source = SEGMENT_SOURCE_DERIVED
+        else:
+            error_code = _map_exception_to_error_code(exc)
+            prefix = (
+                "Out of memory during segmentation"
+                if error_code == SegmentsErrorCode.MODEL_OOM
+                else "Segmentation failed"
+            )
+            logger.exception("Segmentation error for asset_id=%s", asset_id)
+            return _error_result(
+                asset_id,
+                exc,
+                error_code.value,
+                prefix,
+            )
 
     try:
         segments = []
@@ -829,7 +859,7 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
                     start_sec=start,
                     end_sec=end,
                     confidence=confidence,
-                    source=SEGMENT_SOURCE,
+                    source=segment_source,
                 )
             )
 
@@ -892,7 +922,12 @@ def run_segments_worker(asset_id: str) -> SegmentsResult:
             )
 
         segmentation_time_ms = int((time.monotonic() - start_time) * 1000)
-        metrics = _compute_metrics(segments, total_duration, segmentation_time_ms)
+        metrics = _compute_metrics(
+            segments,
+            total_duration,
+            segmentation_time_ms,
+            source=segment_source,
+        )
 
         logger.info(
             "Segments computed for asset_id=%s: %d segments, %.2fs total, %dms",
