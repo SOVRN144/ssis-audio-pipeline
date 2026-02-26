@@ -77,8 +77,12 @@ STAGE_LOCK_TTL_SECONDS = _get_lock_ttl()
 
 
 def validate_config() -> None:
-    """Run non-throwing config validations for warn+fallback settings."""
-    _parse_int_env("SSIS_LOCK_TTL_SEC", 600, min_value=1)
+    """Run non-throwing config validations for warn+fallback settings.
+
+    Reuse STAGE_LOCK_TTL_SECONDS, which is parsed once at import time by
+    _get_lock_ttl() via _parse_int_env, to avoid duplicate warning logs.
+    """
+    _ = STAGE_LOCK_TTL_SECONDS
 
 
 # Canonical audio format (Blueprint section 1)
