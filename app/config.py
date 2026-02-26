@@ -80,6 +80,7 @@ def validate_config() -> None:
     """Run non-throwing config validations for warn+fallback settings."""
     _parse_int_env("SSIS_LOCK_TTL_SEC", 600, min_value=1)
 
+
 # Canonical audio format (Blueprint section 1)
 CANONICAL_SAMPLE_RATE = 22050
 CANONICAL_CHANNELS = 1
