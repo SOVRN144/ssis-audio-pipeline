@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
         validate_config()
     except Exception:
         logger.warning("Config validation failed during startup (non-fatal)", exc_info=True)
+    logger.info("Config validation completed (non-fatal)")
 
     # Startup: initialize database
     global _session_factory
