@@ -14,6 +14,7 @@ The consumer will pick up orchestrator tick tasks and dispatch stage workers.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -22,6 +23,39 @@ from huey import SqliteHuey, crontab
 from app.config import HUEY_DB_PATH, QUEUE_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _log_event(
+    level: int,
+    event: str,
+    *,
+    job_id: str | None = None,
+    asset_id: str | None = None,
+    stage: str | None = None,
+    attempt: int | None = None,
+    error_code: str | None = None,
+    **extra: object,
+) -> None:
+    """Emit structured log event with stable keys for pipeline correlation."""
+    payload: dict[str, object] = {"event": event, "component": "huey"}
+
+    if job_id is not None:
+        payload["job_id"] = job_id
+    if asset_id is not None:
+        payload["asset_id"] = asset_id
+    if stage is not None:
+        payload["stage"] = stage
+    if attempt is not None:
+        payload["attempt"] = attempt
+    if error_code is not None:
+        payload["error_code"] = error_code
+
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
+
+    logger.log(level, json.dumps(payload, sort_keys=True, default=str))
+
 
 # Maximum number of assets to enqueue per periodic sweep to avoid hammering.
 SWEEP_BATCH_LIMIT = 50
@@ -59,9 +93,20 @@ def orchestrator_tick_task(asset_id: str) -> dict:
     # Import here to avoid circular imports
     from app.orchestrator import orchestrator_tick
 
-    logger.info("Orchestrator tick task started for asset_id=%s", asset_id)
+    _log_event(
+        logging.INFO,
+        "orchestrator_tick_task_started",
+        asset_id=asset_id,
+        stage="orchestrator_tick",
+    )
     result = orchestrator_tick(asset_id)
-    logger.info("Orchestrator tick task completed for asset_id=%s: %s", asset_id, result)
+    _log_event(
+        logging.INFO,
+        "orchestrator_tick_task_completed",
+        asset_id=asset_id,
+        stage="orchestrator_tick",
+        result=result,
+    )
     return result
 
 
@@ -83,11 +128,22 @@ def stage_worker_task(job_id: str, asset_id: str, stage: str) -> dict:
     # Import here to avoid circular imports
     from app.orchestrator import execute_stage
 
-    logger.info(
-        "Stage worker task started: job_id=%s, asset_id=%s, stage=%s", job_id, asset_id, stage
+    _log_event(
+        logging.INFO,
+        "stage_worker_task_started",
+        job_id=job_id,
+        asset_id=asset_id,
+        stage=stage,
     )
     result = execute_stage(job_id, asset_id, stage)
-    logger.info("Stage worker task completed: job_id=%s, result=%s", job_id, result)
+    _log_event(
+        logging.INFO,
+        "stage_worker_task_completed",
+        job_id=job_id,
+        asset_id=asset_id,
+        stage=stage,
+        result=result,
+    )
     return result
 
 
@@ -100,7 +156,12 @@ def enqueue_orchestrator_tick(asset_id: str) -> None:
     Args:
         asset_id: The asset ID to process.
     """
-    logger.info("Enqueueing orchestrator tick for asset_id=%s", asset_id)
+    _log_event(
+        logging.INFO,
+        "enqueue_orchestrator_tick",
+        asset_id=asset_id,
+        stage="orchestrator_tick",
+    )
     orchestrator_tick_task(asset_id)
 
 
@@ -113,12 +174,13 @@ def enqueue_stage_worker(job_id: str, asset_id: str, stage: str, delay_seconds: 
         stage: The pipeline stage.
         delay_seconds: Optional delay before execution (for retries).
     """
-    logger.info(
-        "Enqueueing stage worker: job_id=%s, asset_id=%s, stage=%s, delay=%ds",
-        job_id,
-        asset_id,
-        stage,
-        delay_seconds,
+    _log_event(
+        logging.INFO,
+        "enqueue_stage_worker",
+        job_id=job_id,
+        asset_id=asset_id,
+        stage=stage,
+        delay_seconds=delay_seconds,
     )
     if delay_seconds > 0:
         stage_worker_task.schedule((job_id, asset_id, stage), delay=delay_seconds)
@@ -145,15 +207,40 @@ def orchestrator_sweep_task() -> dict:
         asset_ids = find_assets_needing_tick(session, limit=SWEEP_BATCH_LIMIT)
 
         if not asset_ids:
-            logger.debug("Orchestrator sweep found no assets needing work")
+            _log_event(
+                logging.DEBUG,
+                "orchestrator_sweep_no_assets",
+                stage="orchestrator_sweep",
+                enqueued_count=0,
+            )
             return {"enqueued": 0, "asset_ids": []}
 
         for asset_id in asset_ids:
             orchestrator_tick_task(asset_id)
 
-        logger.info("Orchestrator sweep enqueued %d assets for orchestration", len(asset_ids))
+        _log_event(
+            logging.INFO,
+            "orchestrator_sweep_enqueued",
+            stage="orchestrator_sweep",
+            enqueued_count=len(asset_ids),
+        )
+        _log_event(
+            logging.DEBUG,
+            "orchestrator_sweep_enqueued_asset_ids",
+            stage="orchestrator_sweep",
+            enqueued_count=len(asset_ids),
+            asset_ids=asset_ids,
+        )
         return {"enqueued": len(asset_ids), "asset_ids": asset_ids}
-    except Exception:
+    except Exception as exc:
+        _log_event(
+            logging.ERROR,
+            "orchestrator_sweep_failed",
+            stage="orchestrator_sweep",
+            error_code="SWEEP_EXCEPTION",
+            exc_type=type(exc).__name__,
+            exc_msg=str(exc),
+        )
         logger.exception("Orchestrator sweep failed")
         raise
     finally:
