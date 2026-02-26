@@ -4,8 +4,11 @@ Minimal configuration for Step 1. No external config libraries.
 All paths are relative to the repository root by default.
 """
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Repository root (parent of app/)
 REPO_ROOT = Path(__file__).parent.parent.resolve()
@@ -28,6 +31,34 @@ QUEUE_DIR = DATA_DIR / "queue"
 HUEY_DB_PATH = QUEUE_DIR / "huey.db"
 
 
+def _parse_int_env(name: str, default: int, *, min_value: int = 1) -> int:
+    """Parse positive integer environment variable with warn+fallback semantics."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; expected integer >= %d, using default=%d",
+            name,
+            raw,
+            min_value,
+            default,
+        )
+        return default
+    if value < min_value:
+        logger.warning(
+            "Invalid %s=%r; expected integer >= %d, using default=%d",
+            name,
+            raw,
+            min_value,
+            default,
+        )
+        return default
+    return value
+
+
 def _get_lock_ttl() -> int:
     """Get lock TTL from environment or use default.
 
@@ -37,20 +68,17 @@ def _get_lock_ttl() -> int:
     Returns:
         Lock TTL in seconds.
     """
-    env_val = os.environ.get("SSIS_LOCK_TTL_SEC")
-    if env_val:
-        try:
-            ttl = int(env_val)
-            if ttl > 0:
-                return ttl
-        except ValueError:
-            pass
-    return 600  # Default: 10 minutes
+    return _parse_int_env("SSIS_LOCK_TTL_SEC", 600, min_value=1)
 
 
 # Stage lock TTL in seconds (Blueprint section 7: ~10 minutes)
 # Override with SSIS_LOCK_TTL_SEC environment variable for testing
 STAGE_LOCK_TTL_SECONDS = _get_lock_ttl()
+
+
+def validate_config() -> None:
+    """Run non-throwing config validations for warn+fallback settings."""
+    _parse_int_env("SSIS_LOCK_TTL_SEC", 600, min_value=1)
 
 # Canonical audio format (Blueprint section 1)
 CANONICAL_SAMPLE_RATE = 22050
