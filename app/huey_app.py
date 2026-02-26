@@ -223,6 +223,12 @@ def orchestrator_sweep_task() -> dict:
             "orchestrator_sweep_enqueued",
             stage="orchestrator_sweep",
             enqueued_count=len(asset_ids),
+        )
+        _log_event(
+            logging.DEBUG,
+            "orchestrator_sweep_enqueued_asset_ids",
+            stage="orchestrator_sweep",
+            enqueued_count=len(asset_ids),
             asset_ids=asset_ids,
         )
         return {"enqueued": len(asset_ids), "asset_ids": asset_ids}
