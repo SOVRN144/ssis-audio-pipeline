@@ -24,6 +24,7 @@ from app.config import HUEY_DB_PATH, QUEUE_DIR
 
 logger = logging.getLogger(__name__)
 
+
 def _log_event(
     level: int,
     event: str,
