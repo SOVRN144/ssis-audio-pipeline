@@ -22,6 +22,7 @@ from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.config import validate_config
 from app.db import init_db
 from app.schemas import IngestErrorResponse, IngestLocalRequest, IngestSuccessResponse
 from services.ingest_api.service import (
@@ -99,6 +100,12 @@ async def lifespan(app: FastAPI):
 
     Initializes database on startup and cleans up orphan temp files.
     """
+    # Startup: validate config (best-effort, never fails startup)
+    try:
+        validate_config()
+    except Exception:
+        logger.warning("Config validation failed during startup (non-fatal)", exc_info=True)
+
     # Startup: initialize database
     global _session_factory
     _, _session_factory = init_db()
