@@ -36,7 +36,7 @@ def _log_event(
     **extra: object,
 ) -> None:
     """Emit structured log event with stable keys for pipeline correlation."""
-    payload: dict[str, object] = {"event": event}
+    payload: dict[str, object] = {"event": event, "component": "huey"}
 
     if job_id is not None:
         payload["job_id"] = job_id
@@ -232,6 +232,7 @@ def orchestrator_sweep_task() -> dict:
             stage="orchestrator_sweep",
             error_code="SWEEP_EXCEPTION",
             exc_type=type(exc).__name__,
+            exc_msg=str(exc),
         )
         logger.exception("Orchestrator sweep failed")
         raise
